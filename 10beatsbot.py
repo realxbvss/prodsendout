@@ -1,245 +1,439 @@
 import os
+import platform
 import threading
-import ffmpeg
 import logging
 import tkinter as tk
 from tkinter import filedialog, messagebox, simpledialog
-from datetime import datetime
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
 from googleapiclient.errors import HttpError
-from telegram import Bot
-import time  # Добавлен импорт для паузы между загрузками
-import pytz
-from datetime import datetime
+import time
+import subprocess
+import shutil
+import tempfile
+from pathlib import Path
 
-def convert_to_iso8601(user_input, timezone_str="Europe/Moscow"):
-    """
-    Преобразует введенную дату в формат ISO 8601 (UTC) для YouTube API.
-    user_input - строка в формате "ДД.ММ.ГГГГ ЧЧ:ММ"
-    """
+# Автоматическое определение пути к FFmpeg
+FFMPEG_PATH = r'C:\ffmpeg\bin\ffmpeg.exe' if platform.system() == 'Windows' else '/opt/homebrew/bin/ffmpeg'
+
+# Настройка логирования
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s"
+)
+
+# Глобальные переменные
+vpn_configs = []
+proxy_addresses = []
+
+
+def check_ffmpeg():
+    """Проверяет доступность FFmpeg с учетом платформы"""
     try:
-        local_tz = pytz.timezone(timezone_str)  # Часовой пояс пользователя
-        dt_local = datetime.strptime(user_input, "%d.%m.%Y %H:%M")  # Преобразуем строку в datetime
-        dt_local = local_tz.localize(dt_local)  # Добавляем информацию о часовом поясе
-        dt_utc = dt_local.astimezone(pytz.utc)  # Конвертируем в UTC
-
-        return dt_utc.strftime("%Y-%m-%dT%H:%M:%SZ")  # Возвращаем ISO 8601
-
-    except ValueError:
-        return None  # Ошибка в формате даты
-
-# Логирование
-logging.basicConfig(filename='youtube_bot.log', level=logging.INFO,
-                    format='%(asctime)s - %(levelname)s - %(message)s')
-
-
-def log_info(message):
-    print(f"INFO: {message}")
-    logging.info(message)
-
-
-def log_error(message):
-    print(f"ERROR: {message}")
-    logging.error(message)
+        if platform.system() == 'Darwin':
+            # Для macOS проверяем через which
+            result = subprocess.run(['which', 'ffmpeg'],
+                                    capture_output=True,
+                                    text=True)
+            if result.returncode != 0:
+                raise FileNotFoundError
+        else:
+            subprocess.run([FFMPEG_PATH, '-version'],
+                           check=True,
+                           stdout=subprocess.PIPE,
+                           stderr=subprocess.PIPE)
+        return True
+    except Exception as e:
+        logging.error(f"FFmpeg error: {str(e)}")
+        msg = ("FFmpeg не найден! Для macOS выполните:\n"
+               "1. Установите Homebrew:\n"
+               "/bin/bash -c \"$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)\"\n"
+               "2. Установите FFmpeg: brew install ffmpeg")
+        messagebox.showerror("Ошибка FFmpeg", msg)
+        return False
 
 
-# YouTube API
-API_SERVICE_NAME = "youtube"
-API_VERSION = "v3"
-SCOPES = ["https://www.googleapis.com/auth/youtube.upload"]
+def create_video_from_media(image_path, audio_path, output_path):
+    """Создает видео из изображения и аудио"""
+    try:
+        cmd = [
+            FFMPEG_PATH,
+            '-loop', '1',
+            '-i', image_path,
+            '-i', audio_path,
+            '-c:v', 'libx264',
+            '-tune', 'stillimage',
+            '-c:a', 'aac',
+            '-b:a', '192k',
+            '-pix_fmt', 'yuv420p',
+            '-shortest',
+            '-y',
+            output_path
+        ]
+        subprocess.run(cmd, check=True, capture_output=True)
+        return True
+    except subprocess.CalledProcessError as e:
+        error_msg = f"FFmpeg error: {e.stderr.decode()}"
+        logging.error(error_msg)
+        messagebox.showerror("Ошибка FFmpeg", error_msg)
+        return False
+
+
+def connect_to_vpn(vpn_type, config_file):
+    """Подключение VPN"""
+    try:
+        if vpn_type == "OpenVPN":
+            if not shutil.which("openvpn"):
+                logging.warning("OpenVPN не установлен. Пропуск подключения.")
+                return
+            subprocess.run(["openvpn", "--config", config_file], check=True)
+        elif vpn_type == "WireGuard":
+            if not shutil.which("wg-quick"):
+                logging.warning("WireGuard не установлен. Пропуск подключения.")
+                return
+            subprocess.run(["wg-quick", "up", config_file], check=True)
+        logging.info(f"VPN ({vpn_type}) подключен успешно!")
+    except subprocess.CalledProcessError as e:
+        logging.error(f"Ошибка при подключении VPN: {e}")
+
+
+def disconnect_vpn(vpn_type, config_file):
+    """Отключение VPN"""
+    try:
+        if vpn_type == "OpenVPN":
+            subprocess.run(["pkill", "openvpn"], check=True)
+        elif vpn_type == "WireGuard":
+            subprocess.run(["wg-quick", "down", config_file], check=True)
+        logging.info(f"VPN ({vpn_type}) отключен успешно!")
+    except subprocess.CalledProcessError as e:
+        logging.error(f"Ошибка отключения VPN: {e}")
+
+
+def set_proxy(proxy_address):
+    """Установка прокси"""
+    os.environ["http_proxy"] = proxy_address
+    os.environ["https_proxy"] = proxy_address
+    logging.info(f"Прокси установлен: {proxy_address}")
 
 
 def authenticate_youtube_account(token_file):
-    flow = InstalledAppFlow.from_client_secrets_file(token_file, SCOPES)
+    """Аутентификация YouTube"""
+    flow = InstalledAppFlow.from_client_secrets_file(
+        token_file,
+        scopes=["https://www.googleapis.com/auth/youtube.upload"]
+    )
     credentials = flow.run_local_server(port=8080)
-    youtube = build(API_SERVICE_NAME, API_VERSION, credentials=credentials)
-    log_info(f"Аутентификация для {token_file} прошла успешно.")
-    return youtube
-import ffmpeg
-import mutagen
-
-def get_audio_duration(mp3_path):
-    """Определяет длину MP3-файла в секундах"""
-    audio = mutagen.File(mp3_path)
-    return int(audio.info.length) if audio and audio.info else 60  # Если ошибка, длительность по умолчанию = 60 сек.
-
-def create_video(mp3_path, image_path, output_path):
-    """Создает видео из MP3 и изображения с длиной, соответствующей аудио"""
-    duration = get_audio_duration(mp3_path)  # Определяем длину аудиофайла
-
-    video_input = ffmpeg.input(image_path, loop=1, framerate=1, t=duration)  # Устанавливаем длину видео = длине аудио
-    audio_input = ffmpeg.input(mp3_path)
-
-    ffmpeg.output(video_input, audio_input, output_path, vcodec='libx264', acodec='aac', strict='experimental') \
-        .overwrite_output().run()
-    log_info(f"Видео создано ({duration} сек): {output_path}")
+    return build("youtube", "v3", credentials=credentials)
 
 
-def upload_video(youtube, video_path, title, description, tags, publish_at=None, privacy_status="private"):
-    try:
-        request_body = {
-            "snippet": {
-                "title": title,
-                "description": description,
-                "tags": tags,
-                "categoryId": "10"
-            },
-            "status": {
-                "privacyStatus": privacy_status,
-                "madeForKids": False,
-                "selfDeclaredMadeForKids": False
-            }
+def upload_video(youtube, video_path, title, description, tags, publish_at=None):
+    """Загрузка видео на YouTube"""
+    request_body = {
+        "snippet": {
+            "title": title,
+            "description": description,
+            "tags": tags,
+            "categoryId": "10"
+        },
+        "status": {
+            "privacyStatus": "public",
+            "madeForKids": False,
+            "selfDeclaredMadeForKids": False
         }
+    }
+    if publish_at:
+        request_body["status"]["publishAt"] = publish_at
 
-        if publish_at:
-            request_body["status"]["publishAt"] = publish_at  # Убираем ":00Z", т.к. оно уже в правильном формате
-
-        media_file = MediaFileUpload(video_path, mimetype="video/mp4", resumable=True)
-        request = youtube.videos().insert(part="snippet,status", body=request_body, media_body=media_file)
-        response = request.execute()
-
-        log_info(f"✅ Видео {response['id']} успешно загружено!")
-        send_telegram_notification(f"✅ Видео {response['id']} загружено на YouTube.")
-
-    except HttpError as e:
-        log_error(f"❌ Ошибка при загрузке видео: {e}")
-        send_telegram_notification(f"❌ Ошибка загрузки видео: {e}")
+    media_file = MediaFileUpload(video_path, mimetype="video/mp4", resumable=True)
+    request = youtube.videos().insert(
+        part="snippet,status",
+        body=request_body,
+        media_body=media_file
+    )
+    response = request.execute()
+    logging.info(f"Видео '{title}' загружено! ID: {response['id']}")
 
 
-def send_telegram_notification(message):
-    TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "your_default_token")
-    TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "your_default_chat_id")
-
-    bot = Bot(token=TELEGRAM_BOT_TOKEN)
-    bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message)
-    log_info("Telegram уведомление отправлено.")
+def cleanup():
+    """Очистка ресурсов"""
+    for vpn_type, config in vpn_configs:
+        disconnect_vpn(vpn_type, config)
+    os.environ.pop("http_proxy", None)
+    os.environ.pop("https_proxy", None)
+    logging.info("Ресурсы очищены")
 
 
 def gui_interface():
+    """Графический интерфейс с прокруткой"""
     root = tk.Tk()
     root.title("YouTube Video Upload Bot")
+    root.withdraw()
 
-    canvas = tk.Canvas(root)
-    scrollbar = tk.Scrollbar(root, orient="vertical", command=canvas.yview)
-    scrollable_frame = tk.Frame(canvas)
+    try:
+        if not check_ffmpeg():
+            root.destroy()
+            return
 
-    scrollable_frame.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        root.deiconify()
 
-    canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
-    canvas.configure(yscrollcommand=scrollbar.set)
+        # Основной контейнер с прокруткой
+        main_frame = tk.Frame(root)
+        main_frame.pack(fill=tk.BOTH, expand=1)
 
-    canvas.pack(side="left", fill="both", expand=True)
-    scrollbar.pack(side="right", fill="y")
+        # Создаем Canvas и Scrollbar
+        canvas = tk.Canvas(main_frame)
+        scrollbar = tk.Scrollbar(main_frame, orient=tk.VERTICAL, command=canvas.yview)
+        scrollable_frame = tk.Frame(canvas)
 
-    channels = []
+        # Настройка прокрутки
+        scrollable_frame.bind(
+            "<Configure>",
+            lambda e: canvas.configure(
+                scrollregion=canvas.bbox("all")
+            )
+        )
 
-    for i in range(5):
-        frame = tk.LabelFrame(scrollable_frame, text=f"Канал {i + 1}", padx=10, pady=10)
-        frame.pack(padx=10, pady=5, fill="x")
+        canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
 
-        mp3_var = tk.StringVar()
-        images_var = tk.StringVar()
-        token_var = tk.StringVar()
-        title_var = tk.StringVar()
-        description_var = tk.StringVar()
-        tags_var = tk.StringVar()
-        publish_var = tk.StringVar()
+        # Упаковка элементов прокрутки
+        main_frame.pack(fill=tk.BOTH, expand=1)
+        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=1)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
 
-        def browse_mp3_file(entry):
-            filename = filedialog.askopenfilename(filetypes=[("MP3 Files", "*.mp3")])
-            entry.set(filename)
+        channels = []
 
-        def browse_images_folder(entry):
-            foldername = filedialog.askdirectory()
-            entry.set(foldername)
+        # Настройка VPN
+        if messagebox.askyesno("VPN", "Использовать VPN?"):
+            num_vpns = simpledialog.askinteger("VPN", "Количество VPN (1-10):", minvalue=1, maxvalue=10)
+            for i in range(num_vpns):
+                vpn_type = simpledialog.askstring("VPN", "Тип (OpenVPN/WireGuard):")
+                config_file = filedialog.askopenfilename(title=f"Конфиг {vpn_type} {i + 1}")
+                if config_file:
+                    vpn_configs.append((vpn_type, config_file))
 
-        def browse_token_file(entry):
-            filename = filedialog.askopenfilename(filetypes=[("JSON Files", "*.json")])
-            entry.set(filename)
+        # Настройка прокси
+        if messagebox.askyesno("Прокси", "Использовать прокси?"):
+            num_proxies = simpledialog.askinteger("Прокси", "Количество прокси (1-10):", minvalue=1, maxvalue=10)
+            for i in range(num_proxies):
+                proxy = simpledialog.askstring("Прокси", "Формат: http://user:pass@host:port")
+                if proxy:
+                    proxy_addresses.append(proxy)
 
-        def get_publish_time(entry):
-            publish_choice = simpledialog.askstring("Отложенная публикация", "Опубликовать сейчас? (да/нет)")
+        # Настройка каналов
+        num_channels = simpledialog.askinteger("Каналы", "Количество каналов (1-10):", minvalue=1, maxvalue=10)
+        if not num_channels:
+            root.destroy()
+            return
 
-            if not publish_choice:
-                return
+        for _ in range(num_channels):
+            channels.append({
+                'content_type': tk.StringVar(value='video'),
+                'video_path': '',
+                'audio_path': '',
+                'image_path': '',
+                'title_entry': None,
+                'description_entry': None,
+                'tags_entry': None,
+                'publish_at_entry': None,
+                'token_file': '',
+                'video_label': None,
+                'audio_label': None,
+                'image_label': None,
+                'token_label': None
+            })
 
-            if publish_choice.lower() == 'да':
-                entry.set("")  # Публикуем сразу
-                return
+        # Создание элементов интерфейса внутри прокручиваемой области
+        for channel_index in range(num_channels):
+            frame = tk.Frame(scrollable_frame, bd=2, relief=tk.GROOVE)
+            frame.pack(pady=10, padx=10, fill=tk.X)
 
-            publish_date = simpledialog.askstring("Введите дату", "Формат: ДД.ММ.ГГГГ ЧЧ:ММ")
+            # Заголовок канала
+            tk.Label(frame, text=f"Канал {channel_index + 1}", font=('Arial', 10, 'bold')).grid(row=0, column=0,
+                                                                                                columnspan=3)
 
-            if not publish_date:
-                return
+            # Выбор типа контента
+            content_frame = tk.Frame(frame)
+            content_frame.grid(row=1, column=0, columnspan=3, pady=5)
+            tk.Radiobutton(content_frame, text="Готовое видео",
+                           variable=channels[channel_index]['content_type'],
+                           value='video',
+                           command=lambda ci=channel_index: update_labels(ci)).pack(side=tk.LEFT)
+            tk.Radiobutton(content_frame, text="Аудио + Изображение",
+                           variable=channels[channel_index]['content_type'],
+                           value='audio_image',
+                           command=lambda ci=channel_index: update_labels(ci)).pack(side=tk.LEFT)
 
-            iso_date = convert_to_iso8601(publish_date)  # Конвертация в ISO 8601
-            if iso_date:
-                entry.set(iso_date)  # Устанавливаем корректное время публикации
-            else:
-                messagebox.showerror("Ошибка", "Неверный формат даты/времени. Попробуйте снова.")
-                get_publish_time(entry)  # Повторный ввод, если ошибка
+            # Элементы управления
+            video_frame = tk.Frame(frame)
+            video_frame.grid(row=2, column=0, columnspan=3, pady=5)
+            tk.Button(video_frame, text="Выбрать видео",
+                      command=lambda ci=channel_index: select_file(ci, 'video')).pack(side=tk.LEFT)
+            channels[channel_index]['video_label'] = tk.Label(video_frame, text="Видео не выбрано", fg='red')
+            channels[channel_index]['video_label'].pack(side=tk.LEFT, padx=10)
 
-        tk.Label(frame, text="MP3 Файл:").pack(anchor="w")
-        tk.Entry(frame, textvariable=mp3_var, width=50).pack()
-        tk.Button(frame, text="Выбрать MP3", command=lambda e=mp3_var: browse_mp3_file(e)).pack()
+            media_frame = tk.Frame(frame)
+            media_frame.grid(row=3, column=0, columnspan=3, pady=5)
+            tk.Button(media_frame, text="Выбрать аудио",
+                      command=lambda ci=channel_index: select_file(ci, 'audio')).pack(side=tk.LEFT)
+            channels[channel_index]['audio_label'] = tk.Label(media_frame, text="Аудио не выбрано", fg='red')
+            channels[channel_index]['audio_label'].pack(side=tk.LEFT, padx=10)
 
-        tk.Label(frame, text="Папка с изображениями:").pack(anchor="w")
-        tk.Entry(frame, textvariable=images_var, width=50).pack()
-        tk.Button(frame, text="Выбрать папку", command=lambda e=images_var: browse_images_folder(e)).pack()
+            tk.Button(media_frame, text="Выбрать изображение",
+                      command=lambda ci=channel_index: select_file(ci, 'image')).pack(side=tk.LEFT)
+            channels[channel_index]['image_label'] = tk.Label(media_frame, text="Изображение не выбрано", fg='red')
+            channels[channel_index]['image_label'].pack(side=tk.LEFT, padx=10)
 
-        tk.Label(frame, text="Файл токена:").pack(anchor="w")
-        tk.Entry(frame, textvariable=token_var, width=50).pack()
-        tk.Button(frame, text="Выбрать токен", command=lambda e=token_var: browse_token_file(e)).pack()
+            # Метаданные
+            meta_frame = tk.Frame(frame)
+            meta_frame.grid(row=4, column=0, columnspan=3, pady=5)
+            tk.Label(meta_frame, text="Название:").pack(side=tk.LEFT)
+            title_entry = tk.Entry(meta_frame, width=40)
+            title_entry.pack(side=tk.LEFT, padx=5)
+            channels[channel_index]['title_entry'] = title_entry
 
-        tk.Label(frame, text="Название видео:").pack(anchor="w")
-        tk.Entry(frame, textvariable=title_var, width=50).pack()
+            tk.Label(meta_frame, text="Описание:").pack(side=tk.LEFT)
+            description_entry = tk.Entry(meta_frame, width=40)
+            description_entry.pack(side=tk.LEFT, padx=5)
+            channels[channel_index]['description_entry'] = description_entry
 
-        tk.Label(frame, text="Описание:").pack(anchor="w")
-        tk.Entry(frame, textvariable=description_var, width=50).pack()
+            # Теги и дата
+            tags_frame = tk.Frame(frame)
+            tags_frame.grid(row=5, column=0, columnspan=3, pady=5)
+            tk.Label(tags_frame, text="Теги (через запятую):").pack(side=tk.LEFT)
+            tags_entry = tk.Entry(tags_frame, width=40)
+            tags_entry.pack(side=tk.LEFT, padx=5)
+            channels[channel_index]['tags_entry'] = tags_entry
 
-        tk.Label(frame, text="Теги (через запятую):").pack(anchor="w")
-        tk.Entry(frame, textvariable=tags_var, width=50).pack()
+            tk.Label(tags_frame, text="Дата публикации:").pack(side=tk.LEFT)
+            publish_entry = tk.Entry(tags_frame, width=20)
+            publish_entry.pack(side=tk.LEFT, padx=5)
+            channels[channel_index]['publish_at_entry'] = publish_entry
 
-        tk.Button(frame, text="Выбрать время публикации", command=lambda e=publish_var: get_publish_time(e)).pack()
+            # Токен
+            token_frame = tk.Frame(frame)
+            token_frame.grid(row=6, column=0, columnspan=3, pady=5)
+            tk.Button(token_frame, text="Выбрать токен",
+                      command=lambda ci=channel_index: select_file(ci, 'token')).pack(side=tk.LEFT)
+            channels[channel_index]['token_label'] = tk.Label(token_frame, text="Токен не выбран", fg='red')
+            channels[channel_index]['token_label'].pack(side=tk.LEFT, padx=10)
 
-        channels.append({
-            "mp3": mp3_var,
-            "images": images_var,
-            "token": token_var,
-            "title": title_var,
-            "description": description_var,
-            "tags": tags_var,
-            "publish": publish_var
-        })
+        def select_file(channel_index, file_type):
+            """Обработка выбора файлов"""
+            filetypes = {
+                'video': [("MP4", "*.mp4")],
+                'image': [("Изображения", "*.jpg *.jpeg *.png")],
+                'audio': [("Аудио", "*.mp3")],
+                'token': [("JSON", "*.json")]
+            }
+            path = filedialog.askopenfilename(
+                title=f"Выберите {file_type} для канала {channel_index + 1}",
+                filetypes=filetypes[file_type]
+            )
+            if path:
+                if file_type == 'video':
+                    channels[channel_index]['video_path'] = path
+                    channels[channel_index]['audio_path'] = ""
+                    channels[channel_index]['image_path'] = ""
+                elif file_type == 'audio':
+                    channels[channel_index]['audio_path'] = path
+                elif file_type == 'image':
+                    channels[channel_index]['image_path'] = path
+                elif file_type == 'token':
+                    channels[channel_index]['token_file'] = path
+                update_labels(channel_index)
 
-    def start_bot():
-        uploaded_any = False
+        def update_labels(channel_index):
+            """Обновление меток"""
+            channel = channels[channel_index]
+            content_type = channel['content_type'].get()
 
-        for i, channel in enumerate(channels):
-            mp3, images, token, title, description, tags, publish = [channel[key].get().strip() for key in channel]
+            if content_type == 'video':
+                label = "Видео не выбрано" if not channel[
+                    'video_path'] else f"Видео: {Path(channel['video_path']).name}"
+                fg = 'red' if not channel['video_path'] else 'green'
+                channel['video_label'].config(text=label, fg=fg)
+            elif content_type == 'audio_image':
+                audio_label = "Аудио не выбрано" if not channel[
+                    'audio_path'] else f"Аудио: {Path(channel['audio_path']).name}"
+                image_label = "Изображение не выбрано" if not channel[
+                    'image_path'] else f"Изображение: {Path(channel['image_path']).name}"
+                channel['audio_label'].config(text=audio_label, fg='green' if channel['audio_path'] else 'red')
+                channel['image_label'].config(text=image_label, fg='green' if channel['image_path'] else 'red')
 
-            if not mp3 or not images or not token or not title or not description:
-                continue
+            token_label = "Токен не выбран" if not channel[
+                'token_file'] else f"Токен: {Path(channel['token_file']).name}"
+            channel['token_label'].config(text=token_label, fg='green' if channel['token_file'] else 'red')
 
-            uploaded_any = True
-            video_output = f"output_video_{i + 1}.mp4"
-            image_path = next((os.path.join(images, f"{i + 1}{ext}") for ext in [".jpg", ".png"] if os.path.exists(os.path.join(images, f"{i + 1}{ext}"))), None)
+        def start_bot():
+            """Запуск загрузки"""
+            for i, channel in enumerate(channels):
+                content_type = channel['content_type'].get()
 
-            if not image_path:
-                continue
+                if not channel['token_file']:
+                    messagebox.showerror("Ошибка", f"Канал {i + 1}: нет токена!")
+                    return
 
-            create_video(mp3, image_path, video_output)
-            youtube = authenticate_youtube_account(token)
-            threading.Thread(target=upload_video, args=(youtube, video_output, title, description, tags.split(","), publish)).start()
-            time.sleep(1)  # Пауза между загрузками
+                if content_type == 'video' and not channel['video_path']:
+                    messagebox.showerror("Ошибка", f"Канал {i + 1}: нет видео!")
+                    return
+                elif content_type == 'audio_image' and (not channel['audio_path'] or not channel['image_path']):
+                    messagebox.showerror("Ошибка", f"Канал {i + 1}: нет аудио/изображения!")
+                    return
 
-        if not uploaded_any:
-            messagebox.showwarning("Предупреждение", "Ни одно видео не загружено!")
+            # Подключение VPN/прокси
+            for vpn_type, config in vpn_configs:
+                connect_to_vpn(vpn_type, config)
+            for proxy in proxy_addresses:
+                set_proxy(proxy)
 
-    tk.Button(scrollable_frame, text="Начать загрузку", command=start_bot).pack(pady=10)
-    root.mainloop()
+            # Обработка каналов
+            for i, channel in enumerate(channels):
+                try:
+                    content_type = channel['content_type'].get()
+                    video_path = channel['video_path']
+
+                    if content_type == 'audio_image':
+                        with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as f:
+                            temp_path = f.name
+                        if not create_video_from_media(channel['image_path'], channel['audio_path'], temp_path):
+                            continue
+                        video_path = temp_path
+
+                    youtube = authenticate_youtube_account(channel['token_file'])
+                    upload_video(
+                        youtube,
+                        video_path,
+                        channel['title_entry'].get(),
+                        channel['description_entry'].get(),
+                        [tag.strip() for tag in channel['tags_entry'].get().split(",")],
+                        channel['publish_at_entry'].get()
+                    )
+
+                    if content_type == 'audio_image':
+                        os.unlink(video_path)
+
+                except Exception as e:
+                    logging.error(f"Ошибка в канале {i + 1}: {str(e)}")
+                    messagebox.showerror("Ошибка", f"Канал {i + 1}: {str(e)}")
+
+            cleanup()
+
+        # Кнопка запуска
+        tk.Button(scrollable_frame,
+                  text="НАЧАТЬ ЗАГРУЗКУ",
+                  bg='green',
+                  fg='white',
+                  font=('Arial', 12, 'bold'),
+                  command=start_bot).pack(pady=20)
+
+        root.mainloop()
+
+    except Exception as e:
+        logging.error(f"Критическая ошибка: {str(e)}")
+        messagebox.showerror("Ошибка", str(e))
+        root.destroy()
 
 
 if __name__ == "__main__":
