@@ -8,17 +8,19 @@ from typing import Dict
 from dotenv import load_dotenv
 from dotenv import load_dotenv
 import os
-from aiogram import Bot, Dispatcher, types  # Добавьте Bot в импорт
-# Укажите абсолютный путь к .env
-env_path = "/home/yc-user/prodsendout/.env"
-load_dotenv(env_path)  # Явно задаем путь
+from aiogram import Bot, Dispatcher, types
 
-# Проверка токена (добавьте перед инициализацией бота)
-print("[DEBUG] TELEGRAM_TOKEN:", os.getenv("TELEGRAM_TOKEN"))  # Для отладки
+
+from dotenv import load_dotenv
+
+
+env_path = "/home/yc-user/prodsendout/.env"
+load_dotenv(env_path)
+
+print("[DEBUG] Загружен токен:", os.getenv("TELEGRAM_TOKEN"))
 
 # Инициализация бота
 bot = Bot(token=os.getenv("TELEGRAM_TOKEN"))
-load_dotenv()
 
 # Проверка обязательных переменных
 if not all([
