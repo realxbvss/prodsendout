@@ -6,11 +6,18 @@ import asyncio
 from pathlib import Path
 from typing import Dict
 from dotenv import load_dotenv
-
 from dotenv import load_dotenv
-load_dotenv('/home/yc-user/prodsendout/.env')
-print("TOKEN:", os.getenv("TELEGRAM_TOKEN"))
+import os
+from aiogram import Bot, Dispatcher, types  # Добавьте Bot в импорт
+# Укажите абсолютный путь к .env
+env_path = "/home/yc-user/prodsendout/.env"
+load_dotenv(env_path)  # Явно задаем путь
 
+# Проверка токена (добавьте перед инициализацией бота)
+print("[DEBUG] TELEGRAM_TOKEN:", os.getenv("TELEGRAM_TOKEN"))  # Для отладки
+
+# Инициализация бота
+bot = Bot(token=os.getenv("TELEGRAM_TOKEN"))
 load_dotenv()
 
 # Проверка обязательных переменных
