@@ -4,7 +4,7 @@ import tempfile
 import subprocess
 import asyncio
 from pathlib import Path
-from typing import Dict
+from typing import Dict, Optional
 from dotenv import load_dotenv
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.fsm.context import FSMContext
@@ -32,7 +32,7 @@ load_dotenv(env_path)
 # Проверка обязательных переменных
 REQUIRED_ENV = ["TELEGRAM_TOKEN", "REDIS_URL", "ENCRYPTION_KEY"]
 if missing := [var for var in REQUIRED_ENV if not os.getenv(var)]:
-    raise EnvironmentError(f"Отсутствуют переменные окружения: {missing}")
+    raise EnvironmentError(f"Missing environment variables: {missing}")
 
 # Инициализация компонентов
 bot = Bot(token=os.getenv("TELEGRAM_TOKEN"))
@@ -58,12 +58,11 @@ async def get_user_data(user_id: int) -> Dict:
 
 async def update_user_data(user_id: int, data: Dict) -> None:
     """Обновление данных пользователя в Redis"""
-    await storage.redis.hmset(f"user:{user_id}", data)
+    await storage.redis.hset(f"user:{user_id}", mapping=data)
 
 
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
-    """Обработчик команды /start"""
     await message.answer(
         "🎥 YouTube Upload Bot\n\nОтправьте /upload чтобы начать загрузку",
         parse_mode="HTML"
@@ -72,7 +71,6 @@ async def cmd_start(message: types.Message):
 
 @dp.message(Command("upload"))
 async def cmd_upload(message: types.Message, state: FSMContext):
-    """Обработчик команды /upload"""
     await state.set_state(UploadStates.CONTENT_TYPE)
     await message.answer(
         "📁 Выберите тип контента:",
@@ -85,7 +83,6 @@ async def cmd_upload(message: types.Message, state: FSMContext):
 
 @dp.callback_query(F.data.in_(["video", "audio_image"]))
 async def content_type_handler(callback: types.CallbackQuery, state: FSMContext):
-    """Обработчик выбора типа контента"""
     try:
         await state.update_data(content_type=callback.data)
         await callback.message.answer(
@@ -95,45 +92,44 @@ async def content_type_handler(callback: types.CallbackQuery, state: FSMContext)
         await state.set_state(UploadStates.MEDIA_UPLOAD)
         await callback.answer()
     except TelegramBadRequest as e:
-        if "query is too old" in str(e):
-            logger.warning(f"Пропущен устаревший запрос: {e}")
-        else:
-            raise
+        logger.warning(f"Пропущен запрос: {e}")
 
 
 @dp.message(UploadStates.MEDIA_UPLOAD, F.video | F.audio | F.photo)
 async def media_handler(message: types.Message, state: FSMContext, bot: Bot):
-    """Обработчик медиафайлов"""
+    file = None
     try:
         file_type = None
         path = None
+        temp_dir = Path("temp")
+        temp_dir.mkdir(exist_ok=True)
 
         if message.video:
             file = await bot.get_file(message.video.file_id)
             ext = Path(file.file_path).suffix
-            path = f"temp/{message.from_user.id}_video{ext}"
+            path = temp_dir / f"{message.from_user.id}_video{ext}"
             file_type = "video"
         elif message.audio:
             file = await bot.get_file(message.audio.file_id)
-            path = f"temp/{message.from_user.id}_audio.mp3"
+            path = temp_dir / f"{message.from_user.id}_audio.mp3"
             file_type = "audio"
         elif message.photo:
             file = await bot.get_file(message.photo[-1].file_id)
-            path = f"temp/{message.from_user.id}_image.jpg"
+            path = temp_dir / f"{message.from_user.id}_image.jpg"
             file_type = "image"
 
-        if path:
+        if file and path:
             await bot.download_file(file.file_path, path)
-            await state.update_data(**{f"{file_type}_path": path})
+            await state.update_data(**{f"{file_type}_path": str(path)})
 
         data = await state.get_data()
-        content_type = (await state.get_data()).get('content_type')
+        content_type = data.get('content_type')
 
         if (content_type == 'video' and 'video_path' in data) or \
                 (content_type == 'audio_image' and 'audio_path' in data and 'image_path' in data):
             await state.set_state(UploadStates.METADATA)
             await message.answer(
-                "📝 Введите метаданые в формате:\n<b>Название</b>\n<b>Описание</b>\n<b>Теги</b> (через запятую)\n<b>Дата публикации</b> (YYYY-MM-DDTHH:MM:SSZ или 'сейчас')",
+                "📝 Введите метаданные в формате:\n<b>Название</b>\n<b>Описание</b>\n<b>Теги</b> (через запятую)\n<b>Дата публикации</b> (YYYY-MM-DDTHH:MM:SSZ или 'сейчас')",
                 parse_mode="HTML"
             )
         else:
@@ -143,17 +139,29 @@ async def media_handler(message: types.Message, state: FSMContext, bot: Bot):
         await message.answer(f"❌ Ошибка: {str(e)}")
 
 
+def validate_metadata(metadata: Dict) -> bool:
+    """Валидация метаданных"""
+    required_fields = ['title', 'description', 'tags']
+    return all(field in metadata for field in required_fields)
+
+
 @dp.message(UploadStates.METADATA)
 async def metadata_handler(message: types.Message, state: FSMContext):
-    """Обработчик метаданных"""
     try:
         parts = message.text.split('\n')
+        if len(parts) < 3:
+            raise ValueError("Недостаточно данных")
+
         metadata = {
             'title': parts[0],
             'description': parts[1],
             'tags': parts[2].split(','),
             'publish_at': parts[3] if len(parts) > 3 else 'сейчас'
         }
+
+        if not validate_metadata(metadata):
+            raise ValueError("Неверный формат метаданных")
+
         await state.update_data(metadata=metadata)
         await message.answer(
             "⚙️ Хотите настроить VPN/Прокси?",
@@ -163,138 +171,106 @@ async def metadata_handler(message: types.Message, state: FSMContext):
             ])
         )
     except Exception as e:
-        await message.answer(f"❌ Ошибка формата: {str(e)}\nПопробуйте еще раз")
+        await message.answer(f"❌ Ошибка: {str(e)}\nПопробуйте еще раз")
 
 
-@dp.callback_query(F.data == "setup_network")
-async def setup_network(callback: types.CallbackQuery, state: FSMContext):
-    """Обработчик настройки сети"""
-    await callback.message.answer(
-        "🌐 Выберите тип подключения:",
-        reply_markup=types.InlineKeyboardMarkup(inline_keyboard=[
-            [types.InlineKeyboardButton(text="🔐 VPN", callback_data="setup_vpn")],
-            [types.InlineKeyboardButton(text="🔗 Прокси", callback_data="setup_proxy")]
-        ])
-    )
-    await callback.answer()
-
-
-@dp.callback_query(F.data == "setup_vpn")
-async def setup_vpn(callback: types.CallbackQuery, state: FSMContext):
-    """Обработчик настройки VPN"""
-    await callback.message.answer(
-        "📎 Отправьте файл конфига VPN и укажите тип в формате:\n<code>тип;название</code>\nПример:\n<code>openvpn;Мой VPN</code>",
-        parse_mode="HTML"
-    )
-    await state.set_state(UploadStates.VPN_CONFIG)
-    await callback.answer()
+async def save_encrypted_file(user_id: int, file_bytes: bytes, prefix: str) -> str:
+    """Сохранение зашифрованного файла"""
+    encrypted = fernet.encrypt(file_bytes)
+    await update_user_data(user_id, {prefix: encrypted.decode()})
+    return "Успешно сохранено"
 
 
 @dp.message(UploadStates.VPN_CONFIG, F.document)
 async def vpn_config_handler(message: types.Message, state: FSMContext, bot: Bot):
-    """Обработчик конфига VPN"""
     try:
-        vpn_type, name = message.caption.split(';')
+        if not message.caption or ";" not in message.caption:
+            raise ValueError("Неверный формат заголовка")
+
+        vpn_type, name = message.caption.split(";", 1)
         file = await bot.get_file(message.document.file_id)
-        path = f"temp/{message.from_user.id}_vpn.conf"
+        path = Path("temp") / f"{message.from_user.id}_vpn.conf"
+
         await bot.download_file(file.file_path, path)
+        with open(path, "rb") as config_file:
+            result = await save_encrypted_file(message.from_user.id, config_file.read(), f"vpn:{name}")
 
-        with open(path, 'rb') as f:
-            encrypted = fernet.encrypt(f.read())
-
-        await update_user_data(message.from_user.id, {f"vpn:{name}": encrypted.decode()})
-        await message.answer(f"✅ VPN '{name}' сохранен!")
-        os.unlink(path)
+        await message.answer(f"✅ {result}")
+        path.unlink()
 
     except Exception as e:
         await message.answer(f"❌ Ошибка: {str(e)}")
 
 
-@dp.callback_query(F.data == "setup_proxy")
-async def setup_proxy(callback: types.CallbackQuery, state: FSMContext):
-    """Обработчик настройки прокси"""
-    await callback.message.answer(
-        "🔗 Введите прокси в формате:\n<code>тип://логин:пароль@хост:порт</code>\nПример:\n<code>socks5://user123:pass456@1.2.3.4:1080</code>",
-        parse_mode="HTML"
-    )
-    await state.set_state(UploadStates.PROXY)
-    await callback.answer()
-
-
 @dp.message(UploadStates.PROXY)
 async def proxy_handler(message: types.Message, state: FSMContext):
-    """Обработчик прокси"""
     try:
-        if not message.text.startswith(('http://', 'https://', 'socks5://')):
+        if not any(message.text.startswith(proto) for proto in ("http://", "https://", "socks5://")):
             raise ValueError("Неверный формат прокси")
 
-        encrypted = fernet.encrypt(message.text.encode()).decode()
-        await update_user_data(message.from_user.id, {"proxy": encrypted})
+        await save_encrypted_file(message.from_user.id, message.text.encode(), "proxy")
         await message.answer("✅ Прокси сохранен!")
 
     except Exception as e:
         await message.answer(f"❌ Ошибка: {str(e)}")
 
 
-@dp.callback_query(F.data == "skip_network")
-async def skip_network(callback: types.CallbackQuery, state: FSMContext):
-    """Пропуск настройки сети"""
-    await callback.message.answer("📎 Отправьте файл YouTube токена (JSON)")
-    await state.set_state(UploadStates.YOUTUBE_TOKEN)
-    await callback.answer()
-
-
 @dp.message(UploadStates.YOUTUBE_TOKEN, F.document)
 async def token_handler(message: types.Message, state: FSMContext, bot: Bot):
-    """Обработчик токена YouTube"""
     try:
         file = await bot.get_file(message.document.file_id)
-        path = f"temp/{message.from_user.id}_token.json"
+        path = Path("temp") / f"{message.from_user.id}_token.json"
+
         await bot.download_file(file.file_path, path)
+        with open(path, "rb") as token_file:
+            await save_encrypted_file(message.from_user.id, token_file.read(), "youtube_token")
 
-        with open(path, 'rb') as f:
-            encrypted = fernet.encrypt(f.read())
-
-        await update_user_data(message.from_user.id, {"youtube_token": encrypted.decode()})
         await message.answer("✅ Токен сохранен!")
-        os.unlink(path)
+        path.unlink()
         await start_upload_process(message, state)
 
     except Exception as e:
         await message.answer(f"❌ Ошибка: {str(e)}")
 
 
+async def decrypt_user_data(user_id: int, key: str) -> Optional[bytes]:
+    """Дешифровка данных пользователя"""
+    user_data = await get_user_data(user_id)
+    if encrypted := user_data.get(key):
+        return fernet.decrypt(encrypted.encode())
+    return None
+
+
 async def start_upload_process(message: types.Message, state: FSMContext):
-    """Процесс загрузки видео"""
+    state_data = await state.get_data()  # Инициализация state_data
     try:
         user_data = await get_user_data(message.from_user.id)
-        state_data = await state.get_data()
 
         # Настройка прокси
-        if 'proxy' in user_data:
-            proxy = fernet.decrypt(user_data['proxy'].encode()).decode()
-            os.environ.update({
-                'HTTP_PROXY': proxy,
-                'HTTPS_PROXY': proxy
-            })
+        if proxy_data := await decrypt_user_data(message.from_user.id, "proxy"):
+            proxy = proxy_data.decode()
+            os.environ.update({'HTTP_PROXY': proxy, 'HTTPS_PROXY': proxy})
 
         # Проверка токена YouTube
-        if 'youtube_token' not in user_data:
+        if not (token_data := await decrypt_user_data(message.from_user.id, "youtube_token")):
             raise ValueError("Токен YouTube не найден")
 
-        token = fernet.decrypt(user_data['youtube_token'].encode()).decode()
+        # Сохранение токена во временный файл
+        with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as tmp:
+            tmp.write(token_data)
+            token_path = tmp.name
 
         # Подключение VPN
         vpn_connected = False
         for key in user_data:
-            if key.startswith('vpn:'):
+            if key.startswith("vpn:"):
                 try:
-                    decrypted = fernet.decrypt(user_data[key].encode()).decode()
-                    with tempfile.NamedTemporaryFile(delete=False) as f:
-                        f.write(decrypted.encode())
-                        vpn_path = f.name
+                    vpn_data = await decrypt_user_data(message.from_user.id, key)
+                    with tempfile.NamedTemporaryFile(delete=False) as vpn_file:
+                        vpn_file.write(vpn_data)
+                        vpn_path = vpn_file.name
 
-                    vpn_type = key.split(':')[1]
+                    vpn_type = key.split(":")[1]
                     cmd = ["openvpn", "--config", vpn_path] if vpn_type == "openvpn" \
                         else ["wg-quick", "up", vpn_path]
 
@@ -302,21 +278,21 @@ async def start_upload_process(message: types.Message, state: FSMContext):
                     vpn_connected = True
                     break
                 except Exception as e:
-                    logger.error(f"Ошибка подключения VPN: {e}")
+                    logger.error(f"Ошибка VPN: {e}")
                 finally:
-                    os.unlink(vpn_path)
+                    Path(vpn_path).unlink(missing_ok=True)
 
         # Создание видео
-        if state_data['content_type'] == 'audio_image':
+        if state_data.get('content_type') == 'audio_image':
             video_path = await create_video_from_media(
                 state_data['image_path'],
                 state_data['audio_path']
             )
         else:
-            video_path = state_data['video_path']
+            video_path = state_data.get('video_path')
 
         # Загрузка на YouTube
-        service = await asyncio.to_thread(build_youtube_service, token)
+        service = await asyncio.to_thread(build_youtube_service, token_path)
         video_id = await asyncio.to_thread(upload_video, service, video_path, state_data['metadata'])
         await message.answer(f"✅ Видео успешно загружено! ID: {video_id}")
 
@@ -326,8 +302,8 @@ async def start_upload_process(message: types.Message, state: FSMContext):
     finally:
         # Очистка временных файлов
         for file in ['video_path', 'audio_path', 'image_path']:
-            if file in state_data:
-                Path(state_data[file]).unlink(missing_ok=True)
+            if path := state_data.get(file):
+                Path(path).unlink(missing_ok=True)
         await state.clear()
 
 
@@ -395,6 +371,5 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         logger.info("Бот остановлен")
     finally:
-        # Очистка временных файлов
-        for f in Path("temp").glob("*"):
-            f.unlink(missing_ok=True)
+        for temp_file in Path("temp").glob("*"):
+            temp_file.unlink(missing_ok=True)
