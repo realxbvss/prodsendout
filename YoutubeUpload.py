@@ -370,11 +370,11 @@ async def check_running_processes() -> bool:
     """Проверка на дублирующие процессы через Redis"""
     key = "bot_lock"
     try:
-        lock = await storage.redis.get(key)
-        if lock:
-            logger.error("Бот уже запущен! Завершите предыдущий процесс.")
+        # Установите блокировку на 30 секунд
+        locked = await storage.redis.set(key, "locked", nx=True, ex=30)
+        if not locked:
+            logger.error("Бот уже запущен!")
             return True
-        await storage.redis.setex(key, 10, "locked")
         return False
     except Exception as e:
         logger.error(f"Ошибка Redis: {e}")
