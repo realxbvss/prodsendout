@@ -20,7 +20,8 @@ from cryptography.fernet import Fernet
 # Настройка логирования
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    handlers=[logging.StreamHandler()]
 )
 logger = logging.getLogger(__name__)
 
@@ -390,7 +391,7 @@ async def create_video_from_media(image_path: str, audio_path: str) -> str:
 if __name__ == "__main__":
     try:
         Path("temp").mkdir(exist_ok=True)
-        asyncio.run(dp.start_polling(bot))
+        asyncio.run(dp.start_polling(bot, close_bot_session=True))
     except KeyboardInterrupt:
         logger.info("Бот остановлен")
     finally:
