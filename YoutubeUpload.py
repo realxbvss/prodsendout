@@ -52,13 +52,11 @@ class UploadStates(StatesGroup):
 
 
 async def get_user_data(user_id: int) -> Dict:
-    """Получение данных пользователя из Redis"""
     data = await storage.redis.hgetall(f"user:{user_id}")
     return {k.decode(): v.decode() for k, v in data.items()}
 
 
 async def update_user_data(user_id: int, data: Dict) -> None:
-    """Обновление данных пользователя в Redis"""
     await storage.redis.hset(f"user:{user_id}", mapping=data)
 
 
@@ -141,7 +139,6 @@ async def media_handler(message: types.Message, state: FSMContext, bot: Bot):
 
 
 def validate_metadata(metadata: Dict) -> bool:
-    """Валидация метаданных"""
     required_fields = ['title', 'description', 'tags']
     return all(field in metadata for field in required_fields)
 
@@ -176,7 +173,6 @@ async def metadata_handler(message: types.Message, state: FSMContext):
 
 
 async def save_encrypted_file(user_id: int, file_bytes: bytes, prefix: str) -> str:
-    """Сохранение зашифрованного файла"""
     encrypted = fernet.encrypt(file_bytes)
     await update_user_data(user_id, {prefix: encrypted.decode()})
     return "Успешно сохранено"
@@ -235,7 +231,6 @@ async def token_handler(message: types.Message, state: FSMContext, bot: Bot):
 
 
 async def decrypt_user_data(user_id: int, key: str) -> Optional[bytes]:
-    """Дешифровка данных пользователя"""
     user_data = await get_user_data(user_id)
     if encrypted := user_data.get(key):
         return fernet.decrypt(encrypted.encode())
@@ -247,21 +242,17 @@ async def start_upload_process(message: types.Message, state: FSMContext):
     try:
         user_data = await get_user_data(message.from_user.id)
 
-        # Настройка прокси
         if proxy_data := await decrypt_user_data(message.from_user.id, "proxy"):
             proxy = proxy_data.decode()
             os.environ.update({'HTTP_PROXY': proxy, 'HTTPS_PROXY': proxy})
 
-        # Проверка токена YouTube
         if not (token_data := await decrypt_user_data(message.from_user.id, "youtube_token")):
             raise ValueError("Токен YouTube не найден")
 
-        # Создание временного файла токена
         with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as tmp:
             tmp.write(token_data)
             token_path = tmp.name
 
-        # Подключение VPN
         vpn_connected = False
         for key in user_data:
             if key.startswith("vpn:"):
@@ -283,7 +274,6 @@ async def start_upload_process(message: types.Message, state: FSMContext):
                 finally:
                     Path(vpn_path).unlink(missing_ok=True)
 
-        # Создание видео
         if state_data.get('content_type') == 'audio_image':
             video_path = await create_video_from_media(
                 state_data['image_path'],
@@ -292,7 +282,6 @@ async def start_upload_process(message: types.Message, state: FSMContext):
         else:
             video_path = state_data.get('video_path')
 
-        # Загрузка на YouTube
         service = await asyncio.to_thread(build_youtube_service, token_path)
         video_id = await asyncio.to_thread(upload_video, service, video_path, state_data['metadata'])
         await message.answer(f"✅ Видео успешно загружено! ID: {video_id}")
@@ -301,7 +290,6 @@ async def start_upload_process(message: types.Message, state: FSMContext):
         await message.answer(f"❌ Ошибка: {str(e)}")
         logger.exception("Ошибка загрузки")
     finally:
-        # Очистка временных файлов
         for file in ['video_path', 'audio_path', 'image_path']:
             if path := state_data.get(file):
                 Path(path).unlink(missing_ok=True)
@@ -309,18 +297,16 @@ async def start_upload_process(message: types.Message, state: FSMContext):
 
 
 def build_youtube_service(token_path: str):
-    """Создание сервиса YouTube"""
     flow = InstalledAppFlow.from_client_secrets_file(
         token_path,
         scopes=["https://www.googleapis.com/auth/youtube.upload"]
     )
     credentials = flow.run_local_server(port=8080)
-    os.unlink(token_path)  # Удаление временного файла
+    os.unlink(token_path)
     return build("youtube", "v3", credentials=credentials)
 
 
 def upload_video(service, video_path: str, metadata: Dict) -> str:
-    """Загрузка видео на YouTube"""
     request_body = {
         "snippet": {
             "title": metadata['title'],
@@ -341,12 +327,10 @@ def upload_video(service, video_path: str, metadata: Dict) -> str:
         body=request_body,
         media_body=media_file
     )
-    response = request.execute()
-    return response['id']
+    return request.execute()['id']
 
 
 async def create_video_from_media(image_path: str, audio_path: str) -> str:
-    """Создание видео из изображения и аудио"""
     output_path = tempfile.mktemp(suffix=".mp4", dir="temp")
     cmd = [
         "ffmpeg",
@@ -367,39 +351,36 @@ async def create_video_from_media(image_path: str, audio_path: str) -> str:
 
 
 async def check_running_processes() -> bool:
-    """Проверка на дублирующие процессы через Redis"""
+    """Проверка блокировки в Redis"""
     key = "bot_lock"
     try:
-        # Установите блокировку на 30 секунд
+        # Блокировка на 30 секунд с автоматическим удалением
         locked = await storage.redis.set(key, "locked", nx=True, ex=30)
-        if not locked:
-            logger.error("Бот уже запущен!")
-            return True
-        return False
+        return not locked
     except Exception as e:
-        logger.error(f"Ошибка Redis: {e}")
-        return False
+        logger.error(f"Redis error: {e}")
+        return True
 
 
 async def main():
-    """Основная функция запуска"""
     try:
         if await check_running_processes():
+            logger.error("Bot already running! Exiting...")
             sys.exit(1)
 
         Path("temp").mkdir(exist_ok=True)
         await dp.start_polling(bot)
     except KeyboardInterrupt:
-        logger.info("Бот остановлен")
+        logger.info("Bot stopped by user")
     except Exception as e:
-        logger.error(f"Критическая ошибка: {e}")
+        logger.error(f"Critical error: {str(e)}")
     finally:
         try:
             await storage.redis.delete("bot_lock")
         except Exception as e:
-            logger.error(f"Ошибка при удалении блокировки: {e}")
-        for temp_file in Path("temp").glob("*"):
-            temp_file.unlink(missing_ok=True)
+            logger.error(f"Failed to remove lock: {str(e)}")
+        for f in Path("temp").glob("*"):
+            f.unlink(missing_ok=True)
 
 
 if __name__ == "__main__":
