@@ -1,0 +1,5 @@
+aiogram==3.0.0b7
+python-dotenv==0.19.2
+google-api-python-client==2.84.0
+google-auth-oauthlib==0.4.6
+ffmpeg-python==0.2.0
