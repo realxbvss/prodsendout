@@ -1,4 +1,5 @@
 import os
+import sys
 import logging
 import tempfile
 import subprocess
@@ -365,12 +366,32 @@ async def create_video_from_media(image_path: str, audio_path: str) -> str:
     return output_path
 
 
-if __name__ == "__main__":
+async def check_running_processes() -> bool:
+    """Проверка на дублирующие процессы через Redis"""
+    key = "bot_lock"
+    lock = await storage.redis.get(key)
+    if lock:
+        logger.error("Бот уже запущен! Завершите предыдущий процесс.")
+        return True
+    await storage.redis.setex(key, 10, "locked")
+    return False
+
+
+async def main():
+    """Основная функция запуска"""
     try:
+        if await check_running_processes():
+            sys.exit(1)
+
         Path("temp").mkdir(exist_ok=True)
-        asyncio.run(dp.start_polling(bot, close_bot_session=True))
+        await dp.start_polling(bot)
     except KeyboardInterrupt:
         logger.info("Бот остановлен")
     finally:
+        await storage.redis.delete("bot_lock")
         for temp_file in Path("temp").glob("*"):
             temp_file.unlink(missing_ok=True)
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
