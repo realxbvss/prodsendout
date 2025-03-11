@@ -242,7 +242,7 @@ async def decrypt_user_data(user_id: int, key: str) -> Optional[bytes]:
 
 
 async def start_upload_process(message: types.Message, state: FSMContext):
-    state_data = await state.get_data()  # Инициализация state_data
+    state_data = await state.get_data()
     try:
         user_data = await get_user_data(message.from_user.id)
 
@@ -255,7 +255,7 @@ async def start_upload_process(message: types.Message, state: FSMContext):
         if not (token_data := await decrypt_user_data(message.from_user.id, "youtube_token")):
             raise ValueError("Токен YouTube не найден")
 
-        # Сохранение токена во временный файл
+        # Создание временного файла токена
         with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as tmp:
             tmp.write(token_data)
             token_path = tmp.name
@@ -314,6 +314,7 @@ def build_youtube_service(token_path: str):
         scopes=["https://www.googleapis.com/auth/youtube.upload"]
     )
     credentials = flow.run_local_server(port=8080)
+    os.unlink(token_path)  # Удаление временного файла
     return build("youtube", "v3", credentials=credentials)
 
 
