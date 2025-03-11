@@ -369,12 +369,16 @@ async def create_video_from_media(image_path: str, audio_path: str) -> str:
 async def check_running_processes() -> bool:
     """Проверка на дублирующие процессы через Redis"""
     key = "bot_lock"
-    lock = await storage.redis.get(key)
-    if lock:
-        logger.error("Бот уже запущен! Завершите предыдущий процесс.")
-        return True
-    await storage.redis.setex(key, 10, "locked")
-    return False
+    try:
+        lock = await storage.redis.get(key)
+        if lock:
+            logger.error("Бот уже запущен! Завершите предыдущий процесс.")
+            return True
+        await storage.redis.setex(key, 10, "locked")
+        return False
+    except Exception as e:
+        logger.error(f"Ошибка Redis: {e}")
+        return False
 
 
 async def main():
@@ -387,8 +391,13 @@ async def main():
         await dp.start_polling(bot)
     except KeyboardInterrupt:
         logger.info("Бот остановлен")
+    except Exception as e:
+        logger.error(f"Критическая ошибка: {e}")
     finally:
-        await storage.redis.delete("bot_lock")
+        try:
+            await storage.redis.delete("bot_lock")
+        except Exception as e:
+            logger.error(f"Ошибка при удалении блокировки: {e}")
         for temp_file in Path("temp").glob("*"):
             temp_file.unlink(missing_ok=True)
 
