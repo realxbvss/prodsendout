@@ -5,6 +5,7 @@ import tempfile
 import subprocess
 import asyncio
 import signal
+import json
 from pathlib import Path
 from typing import Dict, Optional
 from dotenv import load_dotenv
@@ -295,6 +296,13 @@ async def youtube_token_handler(message: types.Message, state: FSMContext, bot: 
         path = Path("temp") / f"{message.from_user.id}_token.json"
         await bot.download_file(file.file_path, path)
 
+        # Проверка валидности токена
+        with open(path, "r") as f:
+            token_data = json.load(f)
+            if not token_data.get("installed"):
+                raise ValueError("Неверный формат токена")
+
+        # Сохранение токена
         with open(path, "rb") as token_file:
             await save_encrypted_file(message.from_user.id, token_file.read(), "youtube_token")
 
@@ -302,6 +310,8 @@ async def youtube_token_handler(message: types.Message, state: FSMContext, bot: 
         await message.answer("✅ Токен сохранен! Продолжаем загрузку...")
         await start_upload_process(message, state)
 
+    except json.JSONDecodeError:
+        await message.answer("❌ Ошибка: Файл токена не является валидным JSON.")
     except Exception as e:
         await message.answer(f"❌ Ошибка: {str(e)}")
         logger.error(f"Ошибка загрузки токена: {str(e)}")
