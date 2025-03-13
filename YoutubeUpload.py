@@ -4,6 +4,7 @@ import logging
 import tempfile
 import subprocess
 import asyncio
+import signal
 from pathlib import Path
 from typing import Dict, Optional
 from dotenv import load_dotenv
@@ -41,7 +42,6 @@ storage = RedisStorage.from_url(os.getenv("REDIS_URL"))
 dp = Dispatcher(storage=storage)
 fernet = Fernet(os.getenv("ENCRYPTION_KEY").encode())
 
-
 class UploadStates(StatesGroup):
     CONTENT_TYPE = State()
     MEDIA_UPLOAD = State()
@@ -50,15 +50,41 @@ class UploadStates(StatesGroup):
     PROXY = State()
     YOUTUBE_TOKEN = State()
 
+LOCK_KEY = "bot_lock"
+LOCK_TTL = 60  # Время жизни блокировки
 
 async def get_user_data(user_id: int) -> Dict:
     data = await storage.redis.hgetall(f"user:{user_id}")
     return {k.decode(): v.decode() for k, v in data.items()}
 
-
 async def update_user_data(user_id: int, data: Dict) -> None:
     await storage.redis.hset(f"user:{user_id}", mapping=data)
 
+async def acquire_lock() -> bool:
+    """Получение блокировки в Redis"""
+    try:
+        return await storage.redis.set(LOCK_KEY, "locked", nx=True, ex=LOCK_TTL)
+    except Exception as e:
+        logger.error(f"Redis error: {e}")
+        return False
+
+async def release_lock():
+    """Освобождение блокировки"""
+    try:
+        await storage.redis.delete(LOCK_KEY)
+    except Exception as e:
+        logger.error(f"Failed to release lock: {e}")
+
+async def shutdown(signal, loop):
+    """Обработка сигналов завершения"""
+    logger.info(f"Received exit signal {signal.name}...")
+    await release_lock()
+    await bot.close()
+    await storage.close()
+    tasks = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
+    [task.cancel() for task in tasks]
+    await asyncio.gather(*tasks, return_exceptions=True)
+    loop.stop()
 
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
@@ -66,7 +92,6 @@ async def cmd_start(message: types.Message):
         "🎥 YouTube Upload Bot\n\nОтправьте /upload чтобы начать загрузку",
         parse_mode="HTML"
     )
-
 
 @dp.message(Command("upload"))
 async def cmd_upload(message: types.Message, state: FSMContext):
@@ -78,7 +103,6 @@ async def cmd_upload(message: types.Message, state: FSMContext):
             [types.InlineKeyboardButton(text="🖼️ Аудио+Изображение", callback_data="audio_image")]
         ])
     )
-
 
 @dp.callback_query(F.data.in_(["video", "audio_image"]))
 async def content_type_handler(callback: types.CallbackQuery, state: FSMContext):
@@ -92,7 +116,6 @@ async def content_type_handler(callback: types.CallbackQuery, state: FSMContext)
         await callback.answer()
     except TelegramBadRequest as e:
         logger.warning(f"Пропущен запрос: {e}")
-
 
 @dp.message(UploadStates.MEDIA_UPLOAD, F.video | F.audio | F.photo)
 async def media_handler(message: types.Message, state: FSMContext, bot: Bot):
@@ -137,11 +160,9 @@ async def media_handler(message: types.Message, state: FSMContext, bot: Bot):
     except Exception as e:
         await message.answer(f"❌ Ошибка: {str(e)}")
 
-
 def validate_metadata(metadata: Dict) -> bool:
     required_fields = ['title', 'description', 'tags']
     return all(field in metadata for field in required_fields)
-
 
 @dp.message(UploadStates.METADATA)
 async def metadata_handler(message: types.Message, state: FSMContext):
@@ -171,12 +192,10 @@ async def metadata_handler(message: types.Message, state: FSMContext):
     except Exception as e:
         await message.answer(f"❌ Ошибка: {str(e)}\nПопробуйте еще раз")
 
-
 async def save_encrypted_file(user_id: int, file_bytes: bytes, prefix: str) -> str:
     encrypted = fernet.encrypt(file_bytes)
     await update_user_data(user_id, {prefix: encrypted.decode()})
     return "Успешно сохранено"
-
 
 @dp.message(UploadStates.VPN_CONFIG, F.document)
 async def vpn_config_handler(message: types.Message, state: FSMContext, bot: Bot):
@@ -198,7 +217,6 @@ async def vpn_config_handler(message: types.Message, state: FSMContext, bot: Bot
     except Exception as e:
         await message.answer(f"❌ Ошибка: {str(e)}")
 
-
 @dp.message(UploadStates.PROXY)
 async def proxy_handler(message: types.Message, state: FSMContext):
     try:
@@ -210,7 +228,6 @@ async def proxy_handler(message: types.Message, state: FSMContext):
 
     except Exception as e:
         await message.answer(f"❌ Ошибка: {str(e)}")
-
 
 @dp.message(UploadStates.YOUTUBE_TOKEN, F.document)
 async def token_handler(message: types.Message, state: FSMContext, bot: Bot):
@@ -229,13 +246,11 @@ async def token_handler(message: types.Message, state: FSMContext, bot: Bot):
     except Exception as e:
         await message.answer(f"❌ Ошибка: {str(e)}")
 
-
 async def decrypt_user_data(user_id: int, key: str) -> Optional[bytes]:
     user_data = await get_user_data(user_id)
     if encrypted := user_data.get(key):
         return fernet.decrypt(encrypted.encode())
     return None
-
 
 async def start_upload_process(message: types.Message, state: FSMContext):
     state_data = await state.get_data()
@@ -295,7 +310,6 @@ async def start_upload_process(message: types.Message, state: FSMContext):
                 Path(path).unlink(missing_ok=True)
         await state.clear()
 
-
 def build_youtube_service(token_path: str):
     flow = InstalledAppFlow.from_client_secrets_file(
         token_path,
@@ -304,7 +318,6 @@ def build_youtube_service(token_path: str):
     credentials = flow.run_local_server(port=8080)
     os.unlink(token_path)
     return build("youtube", "v3", credentials=credentials)
-
 
 def upload_video(service, video_path: str, metadata: Dict) -> str:
     request_body = {
@@ -329,7 +342,6 @@ def upload_video(service, video_path: str, metadata: Dict) -> str:
     )
     return request.execute()['id']
 
-
 async def create_video_from_media(image_path: str, audio_path: str) -> str:
     output_path = tempfile.mktemp(suffix=".mp4", dir="temp")
     cmd = [
@@ -349,39 +361,29 @@ async def create_video_from_media(image_path: str, audio_path: str) -> str:
     await proc.wait()
     return output_path
 
-
-async def check_running_processes() -> bool:
-    """Проверка блокировки в Redis"""
-    key = "bot_lock"
-    try:
-        # Блокировка на 30 секунд с автоматическим удалением
-        locked = await storage.redis.set(key, "locked", nx=True, ex=30)
-        return not locked
-    except Exception as e:
-        logger.error(f"Redis error: {e}")
-        return True
-
-
 async def main():
     try:
-        if await check_running_processes():
+        if not await acquire_lock():
             logger.error("Bot already running! Exiting...")
             sys.exit(1)
 
+        # Обработка сигналов
+        loop = asyncio.get_running_loop()
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            loop.add_signal_handler(
+                sig,
+                lambda: asyncio.create_task(shutdown(sig, loop))
+            )
+
         Path("temp").mkdir(exist_ok=True)
         await dp.start_polling(bot)
-    except KeyboardInterrupt:
-        logger.info("Bot stopped by user")
+
     except Exception as e:
         logger.error(f"Critical error: {str(e)}")
     finally:
-        try:
-            await storage.redis.delete("bot_lock")
-        except Exception as e:
-            logger.error(f"Failed to remove lock: {str(e)}")
+        await release_lock()
         for f in Path("temp").glob("*"):
             f.unlink(missing_ok=True)
-
 
 if __name__ == "__main__":
     asyncio.run(main())
