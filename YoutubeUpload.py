@@ -6,8 +6,9 @@ import subprocess
 import asyncio
 import signal
 import json
+from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Dict, Optional, List
+from typing import Dict, Optional
 from dotenv import load_dotenv
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.fsm.context import FSMContext
@@ -18,6 +19,8 @@ from aiogram.exceptions import TelegramBadRequest
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
 from google_auth_oauthlib.flow import InstalledAppFlow
+from google.oauth2.credentials import Credentials
+from google.auth.transport.requests import Request
 from cryptography.fernet import Fernet
 
 # Настройка логирования
@@ -51,6 +54,7 @@ class UploadStates(StatesGroup):
     VPN_CONFIG = State()
     PROXY = State()
     YOUTUBE_TOKEN = State()
+    OAUTH_FLOW = State()
 
 
 LOCK_KEY = "bot_lock"
@@ -99,24 +103,144 @@ async def shutdown(signal, loop):
 
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
+    credentials = await get_valid_credentials(message.from_user.id)
+    token_status = ""
+
+    if credentials:
+        expiry_time = credentials.expiry.replace(tzinfo=None)
+        time_left = expiry_time - datetime.utcnow()
+
+        if time_left.total_seconds() > 0:
+            token_status = (
+                "\n\n🔐 Текущий статус авторизации: "
+                f"Действителен еще {time_left // timedelta(hours=1)} ч. "
+                f"{(time_left % timedelta(hours=1)) // timedelta(minutes=1)} мин."
+            )
+        else:
+            token_status = "\n\n⚠️ Ваш токен истек! Используйте /auth для обновления."
+
     await message.answer(
         "🎥 *YouTube Upload Bot*\n\n"
-        "📚 **Инструкция:**\n"
-        "1. Используйте /upload для начала загрузки\n"
-        "2. Выберите тип контента:\n"
-        "   - 🎥 Видео: отправьте MP4-файл\n"
-        "   - 🖼️ Аудио+Изображение: отправьте MP3 и фото\n"
-        "3. Введите метаданные в формате:\n"
-        "   <b>Название</b>\n"
-        "   <b>Описание</b>\n"
-        "   <b>Теги</b> (через запятую)\n"
-        "   <b>Дата публикации</b>\n\n"
-        "⚙️ Настройка VPN/прокси доступна на этапе загрузки.\n"
-        "🔍 Дополнительные команды:\n"
-        "/view_configs - Показать сохраненные конфигурации\n"
-        "/delete_config <ключ> - Удалить конфигурацию",
+        "📚 **Основные команды:**\n"
+        "▶️ /upload - Начать загрузку видео\n"
+        "🔑 /auth - Авторизация в YouTube (обязательно перед первым использованием!)\n"
+        "⚙️ /view_configs - Показать сохраненные настройки\n"
+        "🗑️ /delete_config <ключ> - Удалить конфигурацию\n\n"
+        "❗ *Перед использованием /upload необходимо выполнить /auth*\n"
+        f"{token_status}\n\n"
+        "📝 **Инструкция по загрузке:**\n"
+        "1. Сначала выполните /auth\n"
+        "2. Используйте /upload и следуйте инструкциям\n"
+        "3. Для видео: отправьте MP4-файл\n"
+        "4. Для аудио+изображение: отправьте MP3 и фото\n\n"
+        "🛠️ Техподдержка: @your_support",
         parse_mode="HTML"
     )
+
+
+@dp.message(Command("auth"))
+async def cmd_auth(message: types.Message, state: FSMContext):
+    try:
+        flow = InstalledAppFlow.from_client_secrets_file(
+            "client_secrets.json",
+            scopes=["https://www.googleapis.com/auth/youtube.upload"],
+            redirect_uri="urn:ietf:wg:oauth:2.0:oob"
+        )
+        auth_url, _ = flow.authorization_url(prompt="consent")
+
+        await state.set_state(UploadStates.OAUTH_FLOW)
+        await state.update_data(flow=flow.to_json())
+
+        await message.answer(
+            "🔑 Для авторизации перейдите по ссылке и предоставьте доступ:\n"
+            f"{auth_url}\n\n"
+            "После завершения введите полученный код сюда."
+        )
+    except Exception as e:
+        logger.error(f"Auth error: {str(e)}")
+        await message.answer("❌ Ошибка инициализации авторизации")
+
+
+@dp.message(UploadStates.OAUTH_FLOW)
+async def handle_oauth_code(message: types.Message, state: FSMContext):
+    try:
+        code = message.text.strip()
+        data = await state.get_data()
+        flow_config = json.loads(data['flow'])
+        flow = InstalledAppFlow.from_client_config(
+            flow_config,
+            scopes=["https://www.googleapis.com/auth/youtube.upload"],
+            redirect_uri="urn:ietf:wg:oauth:2.0:oob"
+        )
+
+        flow.fetch_token(code=code)
+        credentials = flow.credentials
+
+        token_data = {
+            'token': credentials.token,
+            'refresh_token': credentials.refresh_token,
+            'token_uri': credentials.token_uri,
+            'client_id': credentials.client_id,
+            'client_secret': credentials.client_secret,
+            'scopes': credentials.scopes,
+            'expiry': credentials.expiry.isoformat()
+        }
+
+        encrypted = fernet.encrypt(json.dumps(token_data).encode())
+        await update_user_data(message.from_user.id, {'youtube_token': encrypted.decode()})
+
+        await message.answer("✅ Авторизация успешно завершена!")
+        await state.clear()
+
+    except Exception as e:
+        logger.error(f"Token handling error: {str(e)}")
+        await message.answer("❌ Ошибка обработки токена. Попробуйте снова.")
+
+
+async def get_valid_credentials(user_id: int) -> Optional[Credentials]:
+    try:
+        encrypted = await decrypt_user_data(user_id, "youtube_token")
+        if not encrypted:
+            return None
+
+        token_data = json.loads(encrypted.decode())
+        expiry = datetime.fromisoformat(token_data['expiry'])
+
+        if datetime.utcnow() > expiry - timedelta(minutes=5):
+            credentials = Credentials(
+                token=token_data['token'],
+                refresh_token=token_data['refresh_token'],
+                token_uri=token_data['token_uri'],
+                client_id=token_data['client_id'],
+                client_secret=token_data['client_secret'],
+                scopes=token_data['scopes']
+            )
+            credentials.refresh(Request())
+
+            token_data.update({
+                'token': credentials.token,
+                'expiry': credentials.expiry.isoformat()
+            })
+            encrypted = fernet.encrypt(json.dumps(token_data).encode())
+            await update_user_data(user_id, {'youtube_token': encrypted.decode()})
+
+        return Credentials(**token_data)
+
+    except Exception as e:
+        logger.error(f"Credentials error: {str(e)}")
+        return None
+
+
+async def decrypt_user_data(user_id: int, key: str) -> Optional[bytes]:
+    try:
+        user_data = await get_user_data(user_id)
+        if encrypted := user_data.get(key):
+            decrypted = fernet.decrypt(encrypted.encode())
+            return decrypted
+        return None
+    except Exception as e:
+        logger.error(f"Decryption error: {str(e)}")
+        return None
 
 
 @dp.message(Command("view_configs"))
@@ -164,6 +288,11 @@ async def cmd_delete_config(message: types.Message):
 
 @dp.message(Command("upload"))
 async def cmd_upload(message: types.Message, state: FSMContext):
+    credentials = await get_valid_credentials(message.from_user.id)
+    if not credentials:
+        await message.answer("❌ Требуется авторизация! Используйте /auth")
+        return
+
     await state.set_state(UploadStates.CONTENT_TYPE)
     await message.answer(
         "📁 Выберите тип контента:",
@@ -336,51 +465,6 @@ async def proxy_handler(message: types.Message, state: FSMContext):
         await message.answer(f"❌ Ошибка: {str(e)}")
 
 
-@dp.message(UploadStates.YOUTUBE_TOKEN, F.document)
-async def youtube_token_handler(message: types.Message, state: FSMContext, bot: Bot):
-    try:
-        logger.info(f"Получен документ токена от пользователя {message.from_user.id}")
-        file = await bot.get_file(message.document.file_id)
-        path = Path("temp") / f"{message.from_user.id}_token.json"
-        await bot.download_file(file.file_path, path)
-
-        # Проверка валидности JSON
-        with open(path, "r") as f:
-            token_data = json.load(f)
-            if not token_data.get("installed"):
-                raise ValueError("Токен не содержит обязательного поля 'installed'")
-
-        # Сохранение токена
-        with open(path, "rb") as token_file:
-            await save_encrypted_file(message.from_user.id, token_file.read(), "youtube_token")
-
-        path.unlink()
-        logger.info(f"Токен пользователя {message.from_user.id} сохранен")
-        await message.answer("✅ Токен сохранен! Продолжаем загрузку...")
-        await start_upload_process(message, state)
-
-    except json.JSONDecodeError:
-        await message.answer("❌ Ошибка: Некорректный формат JSON.")
-        logger.error("Ошибка декодирования JSON")
-    except Exception as e:
-        await message.answer(f"❌ Ошибка: {str(e)}")
-        logger.error(f"Ошибка обработки токена: {str(e)}", exc_info=True)
-
-
-async def decrypt_user_data(user_id: int, key: str) -> Optional[bytes]:
-    try:
-        user_data = await get_user_data(user_id)
-        if encrypted := user_data.get(key):
-            decrypted = fernet.decrypt(encrypted.encode())
-            logger.info(f"Успешно расшифровано значение для ключа {key}")
-            return decrypted
-        logger.warning(f"Ключ {key} не найден в данных пользователя")
-        return None
-    except Exception as e:
-        logger.error(f"Ошибка расшифровки: {str(e)}")
-        return None
-
-
 async def start_upload_process(message: types.Message, state: FSMContext):
     try:
         state_data = await state.get_data()
@@ -394,16 +478,20 @@ async def start_upload_process(message: types.Message, state: FSMContext):
             logger.info(f"Установлен прокси: {proxy}")
 
         # Проверка токена YouTube
-        token_data = await decrypt_user_data(message.from_user.id, "youtube_token")
-        if not token_data:
-            logger.warning("Токен YouTube не найден, запрашиваю...")
-            await message.answer("🔑 Отправьте токен YouTube API (файл .json)")
-            await state.set_state(UploadStates.YOUTUBE_TOKEN)
+        credentials = await get_valid_credentials(message.from_user.id)
+        if not credentials:
+            await message.answer("❌ Требуется авторизация! Используйте /auth")
             return
 
         # Создание временного файла токена
         with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as tmp:
-            tmp.write(token_data)
+            tmp.write(json.dumps({
+                "installed": {
+                    "client_id": credentials.client_id,
+                    "client_secret": credentials.client_secret,
+                    "redirect_uris": ["http://localhost"]
+                }
+            }).encode())
             token_path = tmp.name
             logger.info(f"Временный файл токена создан: {token_path}")
 
