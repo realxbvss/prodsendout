@@ -56,7 +56,6 @@ LOCK_KEY = "bot_lock"
 LOCK_TTL = 60
 
 
-# Функция для валидации метаданных
 def validate_metadata(metadata: Dict) -> bool:
     required_fields = ['title', 'description', 'tags']
     return all(field in metadata for field in required_fields)
@@ -72,7 +71,6 @@ async def update_user_data(user_id: int, data: Dict) -> None:
 
 
 async def acquire_lock() -> bool:
-    """Получение блокировки в Redis"""
     try:
         return await storage.redis.set(LOCK_KEY, "locked", nx=True, ex=LOCK_TTL)
     except Exception as e:
@@ -81,7 +79,6 @@ async def acquire_lock() -> bool:
 
 
 async def release_lock():
-    """Освобождение блокировки"""
     try:
         await storage.redis.delete(LOCK_KEY)
     except Exception as e:
@@ -89,7 +86,6 @@ async def release_lock():
 
 
 async def shutdown(signal, loop):
-    """Обработка сигналов завершения"""
     logger.info(f"Received exit signal {signal.name}...")
     await release_lock()
     await bot.close()
@@ -230,9 +226,18 @@ async def setup_vpn_handler(callback: types.CallbackQuery, state: FSMContext):
 async def vpn_config_handler(message: types.Message, state: FSMContext, bot: Bot):
     try:
         if not message.caption or ";" not in message.caption:
-            raise ValueError("Неверный формат заголовка")
+            await message.answer(
+                "❌ Неверный формат заголовка!\n"
+                "📝 Пример правильного формата:\n"
+                "<code>OpenVPN; MyVPN</code>\n\n"
+                "Отправьте файл конфигурации снова с правильным заголовком."
+            )
+            return
 
         vpn_type, name = message.caption.split(";", 1)
+        vpn_type = vpn_type.strip()
+        name = name.strip()
+
         file = await bot.get_file(message.document.file_id)
         path = Path("temp") / f"{message.from_user.id}_vpn.conf"
 
@@ -240,10 +245,16 @@ async def vpn_config_handler(message: types.Message, state: FSMContext, bot: Bot
         with open(path, "rb") as config_file:
             result = await save_encrypted_file(message.from_user.id, config_file.read(), f"vpn:{name}")
 
-        await message.answer(f"✅ {result}")
+        await message.answer(f"✅ {result}\n\nПродолжаем загрузку...")
         path.unlink()
+        await start_upload_process(message, state)
+
     except Exception as e:
-        await message.answer(f"❌ Ошибка: {str(e)}")
+        logger.error(f"Ошибка VPN: {str(e)}")
+        await message.answer(
+            f"❌ Ошибка: {str(e)}\n"
+            "Проверьте формат файла и попробуйте снова."
+        )
 
 
 async def save_encrypted_file(user_id: int, file_bytes: bytes, prefix: str) -> str:
@@ -260,6 +271,7 @@ async def proxy_handler(message: types.Message, state: FSMContext):
 
         await save_encrypted_file(message.from_user.id, message.text.encode(), "proxy")
         await message.answer("✅ Прокси сохранен!")
+        await start_upload_process(message, state)
     except Exception as e:
         await message.answer(f"❌ Ошибка: {str(e)}")
 
@@ -281,7 +293,9 @@ async def start_upload_process(message: types.Message, state: FSMContext):
             os.environ.update({'HTTP_PROXY': proxy, 'HTTPS_PROXY': proxy})
 
         if not (token_data := await decrypt_user_data(message.from_user.id, "youtube_token")):
-            raise ValueError("Токен YouTube не найден")
+            await message.answer("🔑 Отправьте токен YouTube API (файл .json)")
+            await state.set_state(UploadStates.YOUTUBE_TOKEN)
+            return
 
         with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as tmp:
             tmp.write(token_data)
@@ -396,6 +410,7 @@ async def main():
                 sig,
                 lambda: asyncio.create_task(shutdown(sig, loop))
             )
+
         Path("temp").mkdir(exist_ok=True)
         await dp.start_polling(bot)
     except Exception as e:
