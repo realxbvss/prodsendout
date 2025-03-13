@@ -164,7 +164,19 @@ async def image_handler(message: types.Message, state: FSMContext, bot: Bot):
         data = await state.get_data()
         if 'audio_path' in data and 'image_path' in data:
             await state.set_state(UploadStates.METADATA)
-            await message.answer("📝 Введите метаданные...")
+            await message.answer(
+                "📝 Введите метаданные в формате:\n"
+                "<b>Название</b>\n"
+                "<b>Описание</b>\n"
+                "<b>Теги</b> (через запятую)\n"
+                "<b>Дата публикации</b> (YYYY-MM-DDTHH:MM:SSZ или 'сейчас')\n\n"
+                "Пример:\n"
+                "Мое видео\n"
+                "Описание моего видео\n"
+                "тег1,тег2\n"
+                "сейчас",
+                parse_mode="HTML"
+            )
     except Exception as e:
         await message.answer(f"❌ Ошибка: {str(e)}")
 
@@ -274,6 +286,25 @@ async def proxy_handler(message: types.Message, state: FSMContext):
         await start_upload_process(message, state)
     except Exception as e:
         await message.answer(f"❌ Ошибка: {str(e)}")
+
+
+@dp.message(UploadStates.YOUTUBE_TOKEN, F.document)
+async def youtube_token_handler(message: types.Message, state: FSMContext, bot: Bot):
+    try:
+        file = await bot.get_file(message.document.file_id)
+        path = Path("temp") / f"{message.from_user.id}_token.json"
+        await bot.download_file(file.file_path, path)
+
+        with open(path, "rb") as token_file:
+            await save_encrypted_file(message.from_user.id, token_file.read(), "youtube_token")
+
+        path.unlink()
+        await message.answer("✅ Токен сохранен! Продолжаем загрузку...")
+        await start_upload_process(message, state)
+
+    except Exception as e:
+        await message.answer(f"❌ Ошибка: {str(e)}")
+        logger.error(f"Ошибка загрузки токена: {str(e)}")
 
 
 async def decrypt_user_data(user_id: int, key: str) -> Optional[bytes]:
