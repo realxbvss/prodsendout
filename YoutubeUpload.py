@@ -7,7 +7,7 @@ import asyncio
 import signal
 import json
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, Optional, List
 from dotenv import load_dotenv
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.fsm.context import FSMContext
@@ -111,9 +111,55 @@ async def cmd_start(message: types.Message):
         "   <b>Описание</b>\n"
         "   <b>Теги</b> (через запятую)\n"
         "   <b>Дата публикации</b>\n\n"
-        "⚙️ Настройка VPN/прокси доступна на этапе загрузки.",
+        "⚙️ Настройка VPN/прокси доступна на этапе загрузки.\n"
+        "🔍 Дополнительные команды:\n"
+        "/view_configs - Показать сохраненные конфигурации\n"
+        "/delete_config <ключ> - Удалить конфигурацию",
         parse_mode="HTML"
     )
+
+
+@dp.message(Command("view_configs"))
+async def cmd_view_configs(message: types.Message):
+    try:
+        user_data = await get_user_data(message.from_user.id)
+        configs = []
+        for key in user_data:
+            if key.startswith("vpn:") or key in ["proxy", "youtube_token"]:
+                configs.append(f"🔑 {key}")
+
+        if configs:
+            await message.answer(
+                "📂 Сохраненные конфигурации:\n" + "\n".join(configs) +
+                "\n\n❕ Для удаления используйте /delete_config <ключ>"
+            )
+        else:
+            await message.answer("❌ Нет сохраненных конфигураций!")
+    except Exception as e:
+        await message.answer(f"⚠️ Ошибка: {str(e)}")
+
+
+@dp.message(Command("delete_config"))
+async def cmd_delete_config(message: types.Message):
+    try:
+        args = message.text.split()
+        if len(args) < 2:
+            await message.answer("❌ Укажите ключ конфигурации!\nПример: /delete_config vpn:MyVPN")
+            return
+
+        config_key = args[1]
+        user_data = await get_user_data(message.from_user.id)
+
+        if config_key not in user_data:
+            await message.answer(f"❌ Конфигурация '{config_key}' не найдена!")
+            return
+
+        await storage.redis.hdel(f"user:{message.from_user.id}", config_key)
+        await message.answer(f"✅ Конфигурация '{config_key}' успешно удалена!")
+        logger.info(f"User {message.from_user.id} deleted config: {config_key}")
+
+    except Exception as e:
+        await message.answer(f"⚠️ Ошибка: {str(e)}")
 
 
 @dp.message(Command("upload"))
@@ -273,6 +319,7 @@ async def vpn_config_handler(message: types.Message, state: FSMContext, bot: Bot
 async def save_encrypted_file(user_id: int, file_bytes: bytes, prefix: str) -> str:
     encrypted = fernet.encrypt(file_bytes)
     await update_user_data(user_id, {prefix: encrypted.decode()})
+    logger.info(f"Сохранено зашифрованное значение для {prefix}")
     return "Успешно сохранено"
 
 
@@ -292,97 +339,121 @@ async def proxy_handler(message: types.Message, state: FSMContext):
 @dp.message(UploadStates.YOUTUBE_TOKEN, F.document)
 async def youtube_token_handler(message: types.Message, state: FSMContext, bot: Bot):
     try:
+        logger.info(f"Получен документ токена от пользователя {message.from_user.id}")
         file = await bot.get_file(message.document.file_id)
         path = Path("temp") / f"{message.from_user.id}_token.json"
         await bot.download_file(file.file_path, path)
 
-        # Проверка валидности токена
+        # Проверка валидности JSON
         with open(path, "r") as f:
             token_data = json.load(f)
             if not token_data.get("installed"):
-                raise ValueError("Неверный формат токена")
+                raise ValueError("Токен не содержит обязательного поля 'installed'")
 
         # Сохранение токена
         with open(path, "rb") as token_file:
             await save_encrypted_file(message.from_user.id, token_file.read(), "youtube_token")
 
         path.unlink()
+        logger.info(f"Токен пользователя {message.from_user.id} сохранен")
         await message.answer("✅ Токен сохранен! Продолжаем загрузку...")
         await start_upload_process(message, state)
 
     except json.JSONDecodeError:
-        await message.answer("❌ Ошибка: Файл токена не является валидным JSON.")
+        await message.answer("❌ Ошибка: Некорректный формат JSON.")
+        logger.error("Ошибка декодирования JSON")
     except Exception as e:
         await message.answer(f"❌ Ошибка: {str(e)}")
-        logger.error(f"Ошибка загрузки токена: {str(e)}")
+        logger.error(f"Ошибка обработки токена: {str(e)}", exc_info=True)
 
 
 async def decrypt_user_data(user_id: int, key: str) -> Optional[bytes]:
-    user_data = await get_user_data(user_id)
-    if encrypted := user_data.get(key):
-        return fernet.decrypt(encrypted.encode())
-    return None
+    try:
+        user_data = await get_user_data(user_id)
+        if encrypted := user_data.get(key):
+            decrypted = fernet.decrypt(encrypted.encode())
+            logger.info(f"Успешно расшифровано значение для ключа {key}")
+            return decrypted
+        logger.warning(f"Ключ {key} не найден в данных пользователя")
+        return None
+    except Exception as e:
+        logger.error(f"Ошибка расшифровки: {str(e)}")
+        return None
 
 
 async def start_upload_process(message: types.Message, state: FSMContext):
-    state_data = await state.get_data()
     try:
+        state_data = await state.get_data()
         user_data = await get_user_data(message.from_user.id)
+        logger.info(f"Начало загрузки для пользователя {message.from_user.id}")
 
+        # Проверка прокси
         if proxy_data := await decrypt_user_data(message.from_user.id, "proxy"):
             proxy = proxy_data.decode()
             os.environ.update({'HTTP_PROXY': proxy, 'HTTPS_PROXY': proxy})
+            logger.info(f"Установлен прокси: {proxy}")
 
-        if not (token_data := await decrypt_user_data(message.from_user.id, "youtube_token")):
+        # Проверка токена YouTube
+        token_data = await decrypt_user_data(message.from_user.id, "youtube_token")
+        if not token_data:
+            logger.warning("Токен YouTube не найден, запрашиваю...")
             await message.answer("🔑 Отправьте токен YouTube API (файл .json)")
             await state.set_state(UploadStates.YOUTUBE_TOKEN)
             return
 
+        # Создание временного файла токена
         with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as tmp:
             tmp.write(token_data)
             token_path = tmp.name
+            logger.info(f"Временный файл токена создан: {token_path}")
 
+        # Подключение VPN (если есть)
         vpn_connected = False
         for key in user_data:
             if key.startswith("vpn:"):
                 try:
                     vpn_data = await decrypt_user_data(message.from_user.id, key)
+                    vpn_type = key.split(":")[1]
                     with tempfile.NamedTemporaryFile(delete=False) as vpn_file:
                         vpn_file.write(vpn_data)
                         vpn_path = vpn_file.name
 
-                    vpn_type = key.split(":")[1]
-                    cmd = ["openvpn", "--config", vpn_path] if vpn_type == "openvpn" \
-                        else ["wg-quick", "up", vpn_path]
-
+                    cmd = ["openvpn", "--config", vpn_path] if vpn_type == "openvpn" else ["wg-quick", "up", vpn_path]
                     subprocess.run(cmd, check=True, timeout=30)
                     vpn_connected = True
+                    logger.info(f"VPN {vpn_type} подключен")
                     break
                 except Exception as e:
-                    logger.error(f"Ошибка VPN: {e}")
+                    logger.error(f"Ошибка подключения VPN: {str(e)}")
                 finally:
                     Path(vpn_path).unlink(missing_ok=True)
 
+        # Создание видео (если аудио+изображение)
         if state_data.get('content_type') == 'audio_image':
             video_path = await create_video_from_media(
                 state_data['image_path'],
                 state_data['audio_path']
             )
+            logger.info(f"Видео создано: {video_path}")
         else:
             video_path = state_data.get('video_path')
 
+        # Загрузка на YouTube
         service = await asyncio.to_thread(build_youtube_service, token_path)
         video_id = await asyncio.to_thread(upload_video, service, video_path, state_data['metadata'])
         await message.answer(f"✅ Видео успешно загружено! ID: {video_id}")
+        logger.info(f"Видео {video_id} загружено")
 
     except Exception as e:
         await message.answer(f"❌ Ошибка: {str(e)}")
-        logger.exception("Ошибка загрузки")
+        logger.error("Критическая ошибка загрузки", exc_info=True)
     finally:
+        # Очистка временных файлов
         for file in ['video_path', 'audio_path', 'image_path']:
             if path := state_data.get(file):
                 Path(path).unlink(missing_ok=True)
         await state.clear()
+        logger.info("Состояние сброшено, временные файлы удалены")
 
 
 def build_youtube_service(token_path: str):
@@ -416,7 +487,8 @@ def upload_video(service, video_path: str, metadata: Dict) -> str:
         body=request_body,
         media_body=media_file
     )
-    return request.execute()['id']
+    response = request.execute()
+    return response['id']
 
 
 async def create_video_from_media(image_path: str, audio_path: str) -> str:
@@ -453,13 +525,15 @@ async def main():
             )
 
         Path("temp").mkdir(exist_ok=True)
+        logger.info("Бот запущен")
         await dp.start_polling(bot)
     except Exception as e:
-        logger.error(f"Critical error: {str(e)}")
+        logger.error(f"Critical error: {str(e)}", exc_info=True)
     finally:
         await release_lock()
         for f in Path("temp").glob("*"):
             f.unlink(missing_ok=True)
+        logger.info("Ресурсы освобождены")
 
 
 if __name__ == "__main__":
