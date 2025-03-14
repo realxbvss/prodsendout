@@ -46,7 +46,6 @@ storage = RedisStorage.from_url(os.getenv("REDIS_URL"))
 dp = Dispatcher(storage=storage)
 fernet = Fernet(os.getenv("ENCRYPTION_KEY").encode())
 
-
 class UploadStates(StatesGroup):
     CONTENT_TYPE = State()
     MEDIA_UPLOAD = State()
@@ -56,24 +55,19 @@ class UploadStates(StatesGroup):
     YOUTUBE_TOKEN = State()
     OAUTH_FLOW = State()
 
-
 LOCK_KEY = "bot_lock"
 LOCK_TTL = 60
-
 
 def validate_metadata(metadata: Dict) -> bool:
     required_fields = ['title', 'description', 'tags']
     return all(field in metadata for field in required_fields)
 
-
 async def get_user_data(user_id: int) -> Dict:
     data = await storage.redis.hgetall(f"user:{user_id}")
     return {k.decode(): v.decode() for k, v in data.items()}
 
-
 async def update_user_data(user_id: int, data: Dict) -> None:
     await storage.redis.hset(f"user:{user_id}", mapping=data)
-
 
 async def acquire_lock() -> bool:
     try:
@@ -82,13 +76,11 @@ async def acquire_lock() -> bool:
         logger.error(f"Redis error: {e}")
         return False
 
-
 async def release_lock():
     try:
         await storage.redis.delete(LOCK_KEY)
     except Exception as e:
         logger.error(f"Failed to release lock: {e}")
-
 
 async def shutdown(signal, loop):
     logger.info(f"Received exit signal {signal.name}...")
@@ -99,7 +91,6 @@ async def shutdown(signal, loop):
     [task.cancel() for task in tasks]
     await asyncio.gather(*tasks, return_exceptions=True)
     loop.stop()
-
 
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
@@ -132,7 +123,6 @@ async def cmd_start(message: types.Message):
         parse_mode="HTML"
     )
 
-
 @dp.message(Command("guide"))
 async def cmd_guide(message: types.Message):
     guide_text = (
@@ -147,7 +137,6 @@ async def cmd_guide(message: types.Message):
     )
     await message.answer(guide_text, parse_mode="HTML", disable_web_page_preview=True)
 
-
 @dp.message(Command("auth"))
 async def cmd_auth(message: types.Message, state: FSMContext):
     await message.answer(
@@ -156,7 +145,6 @@ async def cmd_auth(message: types.Message, state: FSMContext):
         parse_mode="HTML"
     )
     await state.set_state(UploadStates.OAUTH_FLOW)
-
 
 @dp.message(UploadStates.OAUTH_FLOW, F.document)
 async def handle_oauth_file(message: types.Message, state: FSMContext, bot: Bot):
@@ -172,7 +160,7 @@ async def handle_oauth_file(message: types.Message, state: FSMContext, bot: Bot)
         )
         auth_url, _ = flow.authorization_url(prompt="consent")
 
-        await state.update_data(flow=flow.to_json())
+        await state.update_data(client_config=flow.client_config)
         await message.answer(
             "🔑 <b>Шаг 2/3:</b> Перейдите по ссылке для авторизации:\n"
             f"<a href='{auth_url}'>Ссылка на авторизацию</a>\n\n"
@@ -185,14 +173,13 @@ async def handle_oauth_file(message: types.Message, state: FSMContext, bot: Bot)
         logger.error(f"Auth error: {str(e)}")
         await message.answer("❌ Неверный формат файла! Используйте /guide для инструкции.")
 
-
 @dp.message(UploadStates.OAUTH_FLOW)
 async def handle_oauth_code(message: types.Message, state: FSMContext):
     try:
         code = message.text.strip()
         data = await state.get_data()
         flow = InstalledAppFlow.from_client_config(
-            json.loads(data['flow']),
+            data['client_config'],
             scopes=["https://www.googleapis.com/auth/youtube.upload"],
             redirect_uri="urn:ietf:wg:oauth:2.0:oob"
         )
@@ -214,7 +201,6 @@ async def handle_oauth_code(message: types.Message, state: FSMContext):
     except Exception as e:
         await message.answer(f"❌ Ошибка: {str(e)}\nПроверьте код и попробуйте снова.")
 
-
 @dp.message(Command("view_configs"))
 async def cmd_view_configs(message: types.Message):
     try:
@@ -233,7 +219,6 @@ async def cmd_view_configs(message: types.Message):
             await message.answer("❌ Нет сохраненных конфигураций!")
     except Exception as e:
         await message.answer(f"⚠️ Ошибка: {str(e)}")
-
 
 @dp.message(Command("delete_config"))
 async def cmd_delete_config(message: types.Message):
@@ -257,7 +242,6 @@ async def cmd_delete_config(message: types.Message):
     except Exception as e:
         await message.answer(f"⚠️ Ошибка: {str(e)}")
 
-
 @dp.message(Command("upload"))
 async def cmd_upload(message: types.Message, state: FSMContext):
     credentials = await get_valid_credentials(message.from_user.id)
@@ -274,7 +258,6 @@ async def cmd_upload(message: types.Message, state: FSMContext):
         ])
     )
 
-
 @dp.callback_query(F.data.in_(["video", "audio_image"]))
 async def content_type_handler(callback: types.CallbackQuery, state: FSMContext):
     try:
@@ -288,7 +271,6 @@ async def content_type_handler(callback: types.CallbackQuery, state: FSMContext)
     except TelegramBadRequest as e:
         logger.warning(f"Пропущен запрос: {e}")
 
-
 @dp.message(UploadStates.MEDIA_UPLOAD, F.audio)
 async def audio_handler(message: types.Message, state: FSMContext, bot: Bot):
     try:
@@ -299,7 +281,6 @@ async def audio_handler(message: types.Message, state: FSMContext, bot: Bot):
         await message.answer("📸 Теперь отправьте изображение (JPG/PNG)")
     except Exception as e:
         await message.answer(f"❌ Ошибка: {str(e)}")
-
 
 @dp.message(UploadStates.MEDIA_UPLOAD, F.photo)
 async def image_handler(message: types.Message, state: FSMContext, bot: Bot):
@@ -327,7 +308,6 @@ async def image_handler(message: types.Message, state: FSMContext, bot: Bot):
             )
     except Exception as e:
         await message.answer(f"❌ Ошибка: {str(e)}")
-
 
 @dp.message(UploadStates.METADATA)
 async def metadata_handler(message: types.Message, state: FSMContext):
@@ -357,7 +337,6 @@ async def metadata_handler(message: types.Message, state: FSMContext):
     except Exception as e:
         await message.answer(f"❌ Ошибка: {str(e)}\nПопробуйте еще раз")
 
-
 @dp.callback_query(F.data == "setup_network")
 async def setup_network_handler(callback: types.CallbackQuery, state: FSMContext):
     await callback.message.answer(
@@ -369,7 +348,6 @@ async def setup_network_handler(callback: types.CallbackQuery, state: FSMContext
     )
     await callback.answer()
 
-
 @dp.callback_query(F.data == "setup_vpn")
 async def setup_vpn_handler(callback: types.CallbackQuery, state: FSMContext):
     await callback.message.answer(
@@ -380,7 +358,6 @@ async def setup_vpn_handler(callback: types.CallbackQuery, state: FSMContext):
     )
     await state.set_state(UploadStates.VPN_CONFIG)
     await callback.answer()
-
 
 @dp.message(UploadStates.VPN_CONFIG, F.document)
 async def vpn_config_handler(message: types.Message, state: FSMContext, bot: Bot):
@@ -416,13 +393,11 @@ async def vpn_config_handler(message: types.Message, state: FSMContext, bot: Bot
             "Проверьте формат файла и попробуйте снова."
         )
 
-
 async def save_encrypted_file(user_id: int, file_bytes: bytes, prefix: str) -> str:
     encrypted = fernet.encrypt(file_bytes)
     await update_user_data(user_id, {prefix: encrypted.decode()})
     logger.info(f"Сохранено зашифрованное значение для {prefix}")
     return "Успешно сохранено"
-
 
 @dp.message(UploadStates.PROXY)
 async def proxy_handler(message: types.Message, state: FSMContext):
@@ -435,7 +410,6 @@ async def proxy_handler(message: types.Message, state: FSMContext):
         await start_upload_process(message, state)
     except Exception as e:
         await message.answer(f"❌ Ошибка: {str(e)}")
-
 
 async def start_upload_process(message: types.Message, state: FSMContext):
     try:
@@ -515,7 +489,6 @@ async def start_upload_process(message: types.Message, state: FSMContext):
         await state.clear()
         logger.info("Состояние сброшено, временные файлы удалены")
 
-
 def build_youtube_service(token_path: str):
     flow = InstalledAppFlow.from_client_secrets_file(
         token_path,
@@ -524,7 +497,6 @@ def build_youtube_service(token_path: str):
     credentials = flow.run_local_server(port=8080)
     os.unlink(token_path)
     return build("youtube", "v3", credentials=credentials)
-
 
 def upload_video(service, video_path: str, metadata: Dict) -> str:
     request_body = {
@@ -550,7 +522,6 @@ def upload_video(service, video_path: str, metadata: Dict) -> str:
     response = request.execute()
     return response['id']
 
-
 async def create_video_from_media(image_path: str, audio_path: str) -> str:
     output_path = tempfile.mktemp(suffix=".mp4", dir="temp")
     cmd = [
@@ -569,7 +540,6 @@ async def create_video_from_media(image_path: str, audio_path: str) -> str:
     proc = await asyncio.create_subprocess_exec(*cmd)
     await proc.wait()
     return output_path
-
 
 async def get_valid_credentials(user_id: int) -> Optional[Credentials]:
     try:
@@ -604,7 +574,6 @@ async def get_valid_credentials(user_id: int) -> Optional[Credentials]:
         logger.error(f"Credentials error: {str(e)}")
         return None
 
-
 async def decrypt_user_data(user_id: int, key: str) -> Optional[bytes]:
     try:
         user_data = await get_user_data(user_id)
@@ -615,7 +584,6 @@ async def decrypt_user_data(user_id: int, key: str) -> Optional[bytes]:
     except Exception as e:
         logger.error(f"Decryption error: {str(e)}")
         return None
-
 
 async def main():
     try:
@@ -640,7 +608,6 @@ async def main():
         for f in Path("temp").glob("*"):
             f.unlink(missing_ok=True)
         logger.info("Ресурсы освобождены")
-
 
 if __name__ == "__main__":
     asyncio.run(main())
