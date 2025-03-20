@@ -25,8 +25,22 @@ from cryptography.fernet import Fernet
 from fastapi import FastAPI
 from dotenv import load_dotenv
 
-# Загрузка переменных из .env
-load_dotenv("../.env")
+import os
+from dotenv import load_dotenv
+from pathlib import Path
+
+# Загрузка переменных
+env_path = Path(__file__).parent.parent / ".env"
+load_dotenv(env_path)
+
+# Проверка переменных
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+REDIS_URL = os.getenv("REDIS_URL")
+ENCRYPTION_KEY = os.getenv("ENCRYPTION_KEY")
+
+if not all([TELEGRAM_TOKEN, REDIS_URL, ENCRYPTION_KEY]):
+    missing = [var for var in ["TELEGRAM_TOKEN", "REDIS_URL", "ENCRYPTION_KEY"] if not os.getenv(var)]
+    raise ValueError(f"Не заданы переменные окружения: {missing}")
 
 app = FastAPI()
 
