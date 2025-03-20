@@ -15,7 +15,8 @@ from google_auth_oauthlib.flow import Flow
 from cryptography.fernet import Fernet
 import redis.asyncio as redis
 import httpx
-
+from dotenv import load_dotenv
+load_dotenv("EnvConfiguration.env")  # Укажите правильный путь
 # Настройка логирования
 logging.basicConfig(
     level=logging.INFO,
