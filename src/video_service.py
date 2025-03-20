@@ -23,6 +23,10 @@ from google.oauth2.credentials import Credentials
 from google.auth.transport.requests import Request
 from cryptography.fernet import Fernet
 from fastapi import FastAPI
+from dotenv import load_dotenv
+
+# Загрузка переменных из .env
+load_dotenv("../.env")
 
 app = FastAPI()
 
