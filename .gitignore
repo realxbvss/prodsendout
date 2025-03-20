@@ -1,2 +1,7 @@
 .env
 youtube_bot.log
+venv/
+.env
+*.log
+__pycache__/
+client_secrets.json
