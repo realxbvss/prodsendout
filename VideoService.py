@@ -5,6 +5,9 @@ import uuid
 
 app = FastAPI()
 
+@app.get("/")
+async def health_check():
+    return {"status": "OK"}
 
 @app.post("/process")
 async def process_video(
