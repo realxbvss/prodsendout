@@ -1,13 +1,15 @@
-from fastapi import FastAPI, File, UploadFile, HTTPException
+from fastapi import FastAPI, File, UploadFile
 import subprocess
 import tempfile
 import uuid
 
 app = FastAPI()
 
+
 @app.get("/")
 async def health_check():
     return {"status": "OK"}
+
 
 @app.post("/process")
 async def process_video(
@@ -15,10 +17,10 @@ async def process_video(
         image: UploadFile = File(...)
 ):
     try:
-        with tempfile.TemporaryDirectory() as tmp:
+        with tempfile.TemporaryDirectory() as tmp_dir:
             # Сохранение файлов
-            audio_path = f"{tmp}/{uuid.uuid4()}.mp3"
-            image_path = f"{tmp}/{uuid.uuid4()}.jpg"
+            audio_path = f"{tmp_dir}/{uuid.uuid4()}.mp3"
+            image_path = f"{tmp_dir}/{uuid.uuid4()}.jpg"
 
             with open(audio_path, "wb") as f:
                 f.write(await audio.read())
@@ -26,20 +28,24 @@ async def process_video(
             with open(image_path, "wb") as f:
                 f.write(await image.read())
 
-            # Обработка видео
-            output_path = f"{tmp}/output.mp4"
+            # Генерация видео
+            output_path = f"{tmp_dir}/output.mp4"
             cmd = [
                 "ffmpeg",
-                "-y", "-loglevel", "error",
-                "-loop", "1", "-i", image_path,
+                "-y",
+                "-loglevel", "error",
+                "-loop", "1",
+                "-i", image_path,
                 "-i", audio_path,
-                "-c:v", "libx264", "-tune", "stillimage",
-                "-c:a", "aac", "-shortest",
+                "-c:v", "libx264",
+                "-tune", "stillimage",
+                "-c:a", "aac",
+                "-shortest",
                 output_path
             ]
             subprocess.run(cmd, check=True)
 
-            return {"path": output_path}
+            return {"video_path": output_path}
 
-    except subprocess.CalledProcessError as e:
-        raise HTTPException(500, f"FFmpeg error: {e}")
+    except Exception as e:
+        return {"error": str(e)}
