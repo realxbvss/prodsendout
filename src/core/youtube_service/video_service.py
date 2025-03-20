@@ -22,6 +22,13 @@ from google_auth_oauthlib.flow import InstalledAppFlow
 from google.oauth2.credentials import Credentials
 from google.auth.transport.requests import Request
 from cryptography.fernet import Fernet
+from fastapi import FastAPI
+
+app = FastAPI()
+
+@app.get("/")
+def health_check():
+    return {"status": "OK"}
 
 # Настройка логирования
 logging.basicConfig(
