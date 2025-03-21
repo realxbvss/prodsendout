@@ -229,7 +229,7 @@ async def handle_oauth_file(message: types.Message, state: FSMContext, bot: Bot)
         flow = InstalledAppFlow.from_client_secrets_file(
             str(path),
             scopes=["https://www.googleapis.com/auth/youtube.upload"],
-            redirect_uri="http://localhost:8080"
+            redirect_uri="urn:ietf:wg:oauth:2.0:oob"
         )
         auth_url, _ = flow.authorization_url(prompt="consent")
 
