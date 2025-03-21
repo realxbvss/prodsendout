@@ -229,10 +229,9 @@ async def handle_oauth_file(message: types.Message, state: FSMContext, bot: Bot)
         auth_url, _ = flow.authorization_url(prompt="consent")  # Определяем auth_url здесь
 
         await state.update_data(
-            client_config=flow.client_config,
+            client_config=data["installed"],  # Передаем всю секцию "installed"
             scopes=["https://www.googleapis.com/auth/youtube.upload"],
-            redirect_uri="urn:ietf:wg:oauth:2.0:oob",
-            auth_url=auth_url  # Сохраняем auth_url в состоянии
+            redirect_uri="urn:ietf:wg:oauth:2.0:oob"
         )
 
         await message.answer(
@@ -259,18 +258,27 @@ async def handle_oauth_code(message: types.Message, state: FSMContext):
         logger.info(f"Получен код: {code}")
         logger.debug(f"Данные состояния: {data}")
 
+        logger.debug(f"client_config: {data['client_config']}")
+        logger.debug(f"scopes: {data['scopes']}")
+        logger.debug(f"redirect_uri: {data['redirect_uri']}")
+
+        # Проверка наличия всех необходимых данных
         if not all(key in data for key in ["client_config", "scopes", "redirect_uri"]):
             await message.answer("❌ Сначала отправьте client_secrets.json!")
             return
 
+        # Создание OAuth-потока с явным указанием client_config
         flow = InstalledAppFlow.from_client_config(
-            data["client_config"],
+            client_config=data["client_config"],
             scopes=data["scopes"],
             redirect_uri=data["redirect_uri"]
         )
+
+        # Получение токена
         flow.fetch_token(code=code)
         credentials = flow.credentials
 
+        # Сохранение токена
         token_data = {
             "token": credentials.token,
             "refresh_token": credentials.refresh_token,
@@ -288,7 +296,7 @@ async def handle_oauth_code(message: types.Message, state: FSMContext):
 
     except Exception as e:
         logger.error(f"Ошибка: {str(e)}", exc_info=True)
-        await message.answer("❌ Ошибка авторизации. Попробуйте снова.")
+        await message.answer("❌ Ошибка авторизации. Проверьте код и попробуйте снова.")
 
 @dp.message(Command("guide"))
 async def cmd_guide(message: types.Message):
