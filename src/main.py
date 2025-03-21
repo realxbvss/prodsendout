@@ -92,9 +92,9 @@ async def get_user_data(user_id: int) -> Dict:
 async def update_user_data(user_id: int, data: Dict) -> None:
     try:
         await storage.redis.hset(f"user:{user_id}", mapping=data)
+        logger.info(f"Данные пользователя {user_id} обновлены.")
     except Exception as e:
         logger.error(f"Ошибка Redis: {str(e)}")
-
 
 async def acquire_lock() -> bool:
     try:
@@ -183,7 +183,10 @@ async def cmd_start(message: types.Message):
 @dp.message(Command("auth"))
 async def cmd_auth(message: types.Message, state: FSMContext):
     await state.clear()
-    await message.answer("📤 Отправьте файл client_secrets.json")
+    await message.answer(
+        "📤 Отправьте файл client_secrets.json.\n"
+        "После получения ссылки авторизуйтесь и вставьте код в чат."
+    )
     await state.set_state(UploadStates.OAUTH_FLOW)
 
 @dp.message(UploadStates.OAUTH_FLOW, F.document)
@@ -246,42 +249,51 @@ async def handle_oauth_file(message: types.Message, state: FSMContext, bot: Bot)
             path.unlink(missing_ok=True)
 
 @dp.message(UploadStates.OAUTH_FLOW)
-async def handle_oauth_code(message: types.Message, state: FSMContext):
+async def handle_oauth_code(message: types.Message, state: FSMContext,code,data):
     try:
+
+        logger.info(f"Получен код авторизации: {code}")
+        logger.debug(f"Данные состояния: {data}")
+        logger.info(f"Токен сохранен для пользователя {message.from_user.id}")
+
         code = message.text.strip()
         data = await state.get_data()
 
-        if not all(key in data for key in ['client_config', 'scopes', 'redirect_uri']):
-            logger.error("Отсутствуют данные для OAuth")
+        # Проверка наличия данных
+        if not all(key in data for key in ["client_config", "scopes", "redirect_uri"]):
             await message.answer("❌ Сначала отправьте client_secrets.json!")
             return
 
+        # Создание OAuth-потока
         flow = InstalledAppFlow.from_client_config(
-            data['client_config'],
-            scopes=data['scopes'],
-            redirect_uri=data['redirect_uri']
+            data["client_config"],
+            scopes=data["scopes"],
+            redirect_uri=data["redirect_uri"]
         )
         flow.fetch_token(code=code)
         credentials = flow.credentials
 
+        # Сохранение токена
         token_data = {
-            'token': credentials.token,
-            'refresh_token': credentials.refresh_token,
-            'expiry': credentials.expiry.isoformat(),
-            'client_id': credentials.client_id,
-            'client_secret': credentials.client_secret,
-            'token_uri': credentials.token_uri,
-            'scopes': credentials.scopes
+            "token": credentials.token,
+            "refresh_token": credentials.refresh_token,
+            "expiry": credentials.expiry.isoformat(),
+            "client_id": credentials.client_id,
+            "client_secret": credentials.client_secret,
+            "token_uri": credentials.token_uri,
+            "scopes": credentials.scopes
         }
         encrypted = fernet.encrypt(json.dumps(token_data).encode())
-        await update_user_data(message.from_user.id, {'youtube_token': encrypted.decode()})
+        await update_user_data(message.from_user.id, {"youtube_token": encrypted.decode()})
 
-        await message.answer("✅ Авторизация успешно завершена!")
-        await state.clear()
+        # Успешное сообщение
+        await message.answer("✅ Авторизация успешна! Теперь вы можете использовать /upload.")
+        await state.clear()  # Очистка состояния
 
     except Exception as e:
         logger.error(f"Ошибка: {str(e)}", exc_info=True)
-        await message.answer(f"❌ Ошибка авторизации: {str(e)}")
+        await message.answer("❌ Ошибка авторизации. Попробуйте снова.")
+
 
 @dp.message(Command("guide"))
 async def cmd_guide(message: types.Message):
