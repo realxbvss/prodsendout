@@ -203,15 +203,17 @@ async def handle_oauth_file(message: types.Message, state: FSMContext, bot: Bot)
             await message.answer("❌ Ошибка при сохранении файла.")
             return
 
-        # Чтение и проверка JSON
         with open(path, "r") as f:
             data = json.load(f)
             logger.debug(f"Содержимое файла: {json.dumps(data, indent=2)}")
 
-        # Проверка обязательных полей
-        required_fields = ["web", "client_id", "client_secret"]
-        if not all(field in data.get("web", {}) for field in required_fields):
-            logger.error("Отсутствуют обязательные поля")
+        if "web" not in data:
+            await message.answer("❌ В файле отсутствует секция 'web'.")
+            return
+
+        web_data = data["web"]
+        required_fields = ["client_id", "client_secret"]
+        if not all(field in web_data for field in required_fields):
             await message.answer("❌ В файле отсутствуют client_id или client_secret.")
             return
 
