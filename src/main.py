@@ -236,8 +236,8 @@ async def handle_oauth_file(message: types.Message, state: FSMContext, bot: Bot)
         # Сохранение данных в состоянии
         await state.update_data(
             client_config=flow.client_config,
-            scopes=flow.scopes,
-            redirect_uri=flow.redirect_uri
+            scopes=["https://www.googleapis.com/auth/youtube.upload"],  # Используйте явное указание scopes
+            redirect_uri="urn:ietf:wg:oauth:2.0:oob"  # И redirect_uri
         )
         await message.answer(f"🔑 Авторизуйтесь по ссылке: {auth_url}")
 
