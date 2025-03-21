@@ -138,10 +138,9 @@ async def decrypt_user_data(user_id: int, key: str) -> Optional[bytes]:
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
     try:
-        # Очистка состояния с корректными параметрами
+        # Исправление: правильный вызов set_state
         await storage.set_state(
-            chat=message.chat.id,
-            user=message.from_user.id,
+            key=f"fsm:{message.from_user.id}",
             state=None
         )
 
@@ -198,7 +197,6 @@ async def handle_oauth_file(message: types.Message, state: FSMContext, bot: Bot)
         )
         auth_url, _ = flow.authorization_url(prompt="consent")
 
-        # Сохраняем всю конфигурацию
         await state.update_data(
             client_config=flow.client_config,
             flow=flow.serialize()
