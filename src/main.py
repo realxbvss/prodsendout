@@ -190,39 +190,34 @@ async def cmd_auth(message: types.Message, state: FSMContext):
 async def handle_oauth_file(message: types.Message, state: FSMContext, bot: Bot):
     path = None
     try:
-        # Проверка MIME-типа
         if message.document.mime_type != "application/json":
             await message.answer("❌ Файл должен быть в формате JSON.")
             return
 
-        # Логирование начала обработки
         logger.info(f"Пользователь {message.from_user.id} отправил client_secrets.json")
 
-        # Скачивание файла
         file = await bot.get_file(message.document.file_id)
         path = Path("temp") / f"{message.from_user.id}_client_secrets.json"
         await bot.download_file(file.file_path, path)
 
-        # Проверка существования файла
         if not path.exists():
             logger.error("Файл не сохранен!")
             await message.answer("❌ Ошибка при сохранении файла.")
             return
 
-        # Чтение и проверка JSON
         with open(path, "r") as f:
             data = json.load(f)
             logger.debug(f"Содержимое файла: {json.dumps(data, indent=2)}")
 
-        # Проверка структуры
-        if "web" not in data:
-            await message.answer("❌ В файле отсутствует секция 'web'.")
+        # Изменено: проверяем секцию "installed"
+        if "installed" not in data:
+            await message.answer("❌ В файле отсутствует секция 'installed'. Используйте Desktop-приложение.")
             return
 
-        web_data = data["web"]
-        required_fields = ["client_id", "client_secret", "project_id", "auth_uri", "token_uri"]
-        if not all(field in web_data for field in required_fields):
-            await message.answer("❌ Неверный формат файла. Скачайте актуальный client_secrets.json из Google Cloud Console.")
+        installed_data = data["installed"]  # Изменено: обращаемся к "installed"
+        required_fields = ["client_id", "client_secret", "redirect_uris"]
+        if not all(field in installed_data for field in required_fields):
+            await message.answer("❌ Неверный формат файла. Скачайте client_secrets.json для Desktop.")
             return
 
         # Создание OAuth-потока
@@ -233,23 +228,22 @@ async def handle_oauth_file(message: types.Message, state: FSMContext, bot: Bot)
         )
         auth_url, _ = flow.authorization_url(prompt="consent")
 
-        # Сохранение данных в состоянии
         await state.update_data(
             client_config=flow.client_config,
-            scopes=["https://www.googleapis.com/auth/youtube.upload"],  # Используйте явное указание scopes
-            redirect_uri="urn:ietf:wg:oauth:2.0:oob"  # И redirect_uri
+            scopes=["https://www.googleapis.com/auth/youtube.upload"],
+            redirect_uri="urn:ietf:wg:oauth:2.0:oob"
         )
         await message.answer(f"🔑 Авторизуйтесь по ссылке: {auth_url}")
 
     except json.JSONDecodeError:
         logger.error("Файл не является JSON")
-        await message.answer("❌ Файл поврежден. Скачайте client_secrets.json из Google Cloud Console.")
+        await message.answer("❌ Файл поврежден.")
     except Exception as e:
         logger.error(f"Ошибка: {str(e)}", exc_info=True)
-        await message.answer("❌ Не удалось обработать файл. Проверьте формат и попробуйте снова.")
+        await message.answer("❌ Не удалось обработать файл.")
     finally:
         if path:
-            path.unlink(missing_ok=True)  # Удалить файл в любом случае
+            path.unlink(missing_ok=True)
 
 @dp.message(UploadStates.OAUTH_FLOW)
 async def handle_oauth_code(message: types.Message, state: FSMContext):
