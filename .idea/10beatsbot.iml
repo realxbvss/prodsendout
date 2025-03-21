@@ -10,6 +10,11 @@
       <sourceFolder url="file://$MODULE_DIR$/src/core/telegram_bot" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/src/core/video_processor" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/src/core/youtube_service" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/.github" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/.github/workflows" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/docker" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/grafana" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/prometheus" isTestSource="false" />
       <excludeFolder url="file://$MODULE_DIR$/.venv" />
     </content>
     <orderEntry type="inheritedJdk" />
