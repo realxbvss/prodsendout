@@ -194,6 +194,15 @@ async def handle_oauth_file(message: types.Message, state: FSMContext, bot: Bot)
         path = Path("temp") / f"{message.from_user.id}_client_secrets.json"
         await bot.download_file(file.file_path, path)
 
+        # Проверка, что файл является JSON
+        with open(path, "r") as f:
+            data = json.load(f)  # Если не JSON — вызовет исключение
+
+        if "web" not in data or "client_id" not in data["web"]:
+            raise ValueError("Неверная структура client_secrets.json")
+
+
+
         flow = InstalledAppFlow.from_client_secrets_file(
             str(path),
             scopes=["https://www.googleapis.com/auth/youtube.upload"],
@@ -211,10 +220,17 @@ async def handle_oauth_file(message: types.Message, state: FSMContext, bot: Bot)
         await message.answer(f"🔑 Авторизуйтесь по ссылке: {auth_url}")
         path.unlink()
 
+    except json.JSONDecodeError:
+        await message.answer(
+            "❌ Файл не является JSON. Скачайте client_secrets.json из Google Cloud Console."
+        )
+    except ValueError as e:
+        await message.answer(
+            "❌ Неверный формат файла. Убедитесь, что файл содержит поля `web` и `client_id`."
+        )
     except Exception as e:
-        logger.error(f"Ошибка авторизации: {str(e)}", exc_info=True)
-        await message.answer("❌ Неверный формат файла!")
-
+        logger.error(f"Ошибка: {str(e)}", exc_info=True)
+        await message.answer("❌ Не удалось обработать файл. Попробуйте снова.")
 
 @dp.message(UploadStates.OAUTH_FLOW)
 async def handle_oauth_code(message: types.Message, state: FSMContext):
@@ -253,6 +269,18 @@ async def handle_oauth_code(message: types.Message, state: FSMContext):
     except Exception as e:
         logger.error(f"Ошибка: {str(e)}", exc_info=True)
         await message.answer(f"❌ Ошибка авторизации: {str(e)}")
+
+@dp.message(Command("guide"))
+async def cmd_guide(message: types.Message):
+    instructions = (
+        "📚 **Инструкция по использованию бота:**\n\n"
+        "1. Для авторизации используйте команду `/auth` и отправьте файл `client_secrets.json`.\n"
+        "2. Чтобы загрузить видео, используйте `/upload`.\n"
+        "3. Просмотрите сохранённые настройки через `/view_configs`.\n"
+        "4. Удалите ненужные настройки командой `/delete_config <ключ>`.\n\n"
+        "❓ Если что-то не работает, напишите в поддержку."
+    )
+    await message.answer(instructions, parse_mode="Markdown")
 
 @dp.message(Command("view_configs"))
 async def cmd_view_configs(message: types.Message):
