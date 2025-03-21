@@ -190,29 +190,32 @@ async def cmd_auth(message: types.Message, state: FSMContext):
 @dp.message(UploadStates.OAUTH_FLOW, F.document)
 async def handle_oauth_file(message: types.Message, state: FSMContext, bot: Bot):
     try:
+        # Логирование начала обработки
+        logger.info("Начало обработки client_secrets.json")
+
         file = await bot.get_file(message.document.file_id)
         path = Path("temp") / f"{message.from_user.id}_client_secrets.json"
-        logger.info(f"Сохранение файла по пути: {path}")
         await bot.download_file(file.file_path, path)
 
+        # Проверка существования файла
         if not path.exists():
             logger.error("Файл не сохранен!")
             await message.answer("❌ Ошибка при сохранении файла.")
             return
 
+        # Чтение и проверка JSON
         with open(path, "r") as f:
-            content = f.read()
-            logger.debug(f"Содержимое файла: {content}")
+            data = json.load(f)
+            logger.debug(f"Содержимое файла: {json.dumps(data, indent=2)}")
 
-        # Проверка, что файл является JSON
-        with open(path, "r") as f:
-            data = json.load(f)  # Если не JSON — вызовет исключение
-
-        if "web" not in data or "client_id" not in data["web"]:
-            logger.error("Неверная структура client_secrets.json")
-            await message.answer("❌ В файле отсутствуют обязательные поля.")
+        # Проверка обязательных полей
+        required_fields = ["web", "client_id", "client_secret"]
+        if not all(field in data.get("web", {}) for field in required_fields):
+            logger.error("Отсутствуют обязательные поля")
+            await message.answer("❌ В файле отсутствуют client_id или client_secret.")
             return
 
+        # Создание OAuth-потока
         flow = InstalledAppFlow.from_client_secrets_file(
             str(path),
             scopes=["https://www.googleapis.com/auth/youtube.upload"],
@@ -220,28 +223,21 @@ async def handle_oauth_file(message: types.Message, state: FSMContext, bot: Bot)
         )
         auth_url, _ = flow.authorization_url(prompt="consent")
 
+        # Сохранение данных в состоянии
         await state.update_data(
             client_config=flow.client_config,
             scopes=flow.scopes,
             redirect_uri=flow.redirect_uri
         )
-        logger.info("Данные OAuth успешно сохранены")
-        logger.debug(f"Данные сохранены: {await state.get_data()}")
-        await state.set_state(UploadStates.OAUTH_FLOW)  # Явное сохранение
         await message.answer(f"🔑 Авторизуйтесь по ссылке: {auth_url}")
         path.unlink()
 
     except json.JSONDecodeError:
-        await message.answer(
-            "❌ Файл не является JSON. Скачайте client_secrets.json из Google Cloud Console."
-        )
-    except ValueError as e:
-        await message.answer(
-            "❌ Неверный формат файла. Убедитесь, что файл содержит поля `web` и `client_id`."
-        )
+        logger.error("Файл не является JSON")
+        await message.answer("❌ Файл поврежден. Скачайте client_secrets.json из Google Cloud Console.")
     except Exception as e:
         logger.error(f"Ошибка: {str(e)}", exc_info=True)
-        await message.answer("❌ Не удалось обработать файл. Попробуйте снова.")
+        await message.answer("❌ Не удалось обработать файл. Проверьте формат и попробуйте снова.")
 
 @dp.message(UploadStates.OAUTH_FLOW)
 async def handle_oauth_code(message: types.Message, state: FSMContext):
