@@ -182,6 +182,7 @@ async def cmd_start(message: types.Message):
 
 @dp.message(Command("auth"))
 async def cmd_auth(message: types.Message, state: FSMContext):
+    await state.clear()
     await message.answer("📤 Отправьте файл client_secrets.json")
     await state.set_state(UploadStates.OAUTH_FLOW)
 
@@ -205,6 +206,8 @@ async def handle_oauth_file(message: types.Message, state: FSMContext, bot: Bot)
             scopes=flow.scopes,
             redirect_uri=flow.redirect_uri
         )
+        logger.debug(f"Данные сохранены: {await state.get_data()}")
+        await state.set_state(UploadStates.OAUTH_FLOW)  # Явное сохранение
         await message.answer(f"🔑 Авторизуйтесь по ссылке: {auth_url}")
         path.unlink()
 
@@ -218,6 +221,11 @@ async def handle_oauth_code(message: types.Message, state: FSMContext):
     try:
         code = message.text.strip()
         data = await state.get_data()
+
+        if not all(key in data for key in ['client_config', 'scopes', 'redirect_uri']):
+            logger.error("Отсутствуют данные для OAuth")
+            await message.answer("❌ Сначала отправьте client_secrets.json!")
+            return
 
         flow = InstalledAppFlow.from_client_config(
             data['client_config'],
@@ -243,8 +251,8 @@ async def handle_oauth_code(message: types.Message, state: FSMContext):
         await state.clear()
 
     except Exception as e:
-        logger.error(f"Ошибка токена: {str(e)}", exc_info=True)
-        await message.answer(f"❌ Ошибка: {str(e)}")
+        logger.error(f"Ошибка: {str(e)}", exc_info=True)
+        await message.answer(f"❌ Ошибка авторизации: {str(e)}")
 
 @dp.message(Command("view_configs"))
 async def cmd_view_configs(message: types.Message):
