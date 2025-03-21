@@ -186,13 +186,19 @@ async def cmd_auth(message: types.Message, state: FSMContext):
     await message.answer("📤 Отправьте файл client_secrets.json")
     await state.set_state(UploadStates.OAUTH_FLOW)
 
-
 @dp.message(UploadStates.OAUTH_FLOW, F.document)
 async def handle_oauth_file(message: types.Message, state: FSMContext, bot: Bot):
+    path = None
     try:
-        # Логирование начала обработки
-        logger.info("Начало обработки client_secrets.json")
+        # Проверка MIME-типа
+        if message.document.mime_type != "application/json":
+            await message.answer("❌ Файл должен быть в формате JSON.")
+            return
 
+        # Логирование начала обработки
+        logger.info(f"Пользователь {message.from_user.id} отправил client_secrets.json")
+
+        # Скачивание файла
         file = await bot.get_file(message.document.file_id)
         path = Path("temp") / f"{message.from_user.id}_client_secrets.json"
         await bot.download_file(file.file_path, path)
@@ -203,18 +209,20 @@ async def handle_oauth_file(message: types.Message, state: FSMContext, bot: Bot)
             await message.answer("❌ Ошибка при сохранении файла.")
             return
 
+        # Чтение и проверка JSON
         with open(path, "r") as f:
             data = json.load(f)
             logger.debug(f"Содержимое файла: {json.dumps(data, indent=2)}")
 
+        # Проверка структуры
         if "web" not in data:
             await message.answer("❌ В файле отсутствует секция 'web'.")
             return
 
         web_data = data["web"]
-        required_fields = ["client_id", "client_secret"]
+        required_fields = ["client_id", "client_secret", "project_id", "auth_uri", "token_uri"]
         if not all(field in web_data for field in required_fields):
-            await message.answer("❌ В файле отсутствуют client_id или client_secret.")
+            await message.answer("❌ Неверный формат файла. Скачайте актуальный client_secrets.json из Google Cloud Console.")
             return
 
         # Создание OAuth-потока
@@ -232,7 +240,6 @@ async def handle_oauth_file(message: types.Message, state: FSMContext, bot: Bot)
             redirect_uri=flow.redirect_uri
         )
         await message.answer(f"🔑 Авторизуйтесь по ссылке: {auth_url}")
-        path.unlink()
 
     except json.JSONDecodeError:
         logger.error("Файл не является JSON")
@@ -240,6 +247,9 @@ async def handle_oauth_file(message: types.Message, state: FSMContext, bot: Bot)
     except Exception as e:
         logger.error(f"Ошибка: {str(e)}", exc_info=True)
         await message.answer("❌ Не удалось обработать файл. Проверьте формат и попробуйте снова.")
+    finally:
+        if path:
+            path.unlink(missing_ok=True)  # Удалить файл в любом случае
 
 @dp.message(UploadStates.OAUTH_FLOW)
 async def handle_oauth_code(message: types.Message, state: FSMContext):
