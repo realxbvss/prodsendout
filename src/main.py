@@ -183,10 +183,7 @@ async def cmd_start(message: types.Message):
 @dp.message(Command("auth"))
 async def cmd_auth(message: types.Message, state: FSMContext):
     await state.clear()
-    await message.answer(
-        "📤 Отправьте файл client_secrets.json.\n"
-        "После получения ссылки авторизуйтесь и вставьте код в чат."
-    )
+    await message.answer("📤 Отправьте файл client_secrets.json.")
     await state.set_state(UploadStates.OAUTH_FLOW)
 
 @dp.message(UploadStates.OAUTH_FLOW, F.document)
@@ -229,14 +226,19 @@ async def handle_oauth_file(message: types.Message, state: FSMContext, bot: Bot)
             scopes=["https://www.googleapis.com/auth/youtube.upload"],
             redirect_uri="urn:ietf:wg:oauth:2.0:oob"
         )
-        auth_url, _ = flow.authorization_url(prompt="consent")
+        auth_url, _ = flow.authorization_url(prompt="consent")  # Определяем auth_url здесь
 
         await state.update_data(
             client_config=flow.client_config,
             scopes=["https://www.googleapis.com/auth/youtube.upload"],
-            redirect_uri="urn:ietf:wg:oauth:2.0:oob"
+            redirect_uri="urn:ietf:wg:oauth:2.0:oob",
+            auth_url=auth_url  # Сохраняем auth_url в состоянии
         )
-        await message.answer(f"🔑 Авторизуйтесь по ссылке: {auth_url}")
+
+        await message.answer(
+            f"🔑 Авторизуйтесь по ссылке: {auth_url}\n\n"
+            "После авторизации скопируйте код и отправьте его боту."
+        )
 
     except json.JSONDecodeError:
         logger.error("Файл не является JSON")
@@ -249,22 +251,18 @@ async def handle_oauth_file(message: types.Message, state: FSMContext, bot: Bot)
             path.unlink(missing_ok=True)
 
 @dp.message(UploadStates.OAUTH_FLOW)
-async def handle_oauth_code(message: types.Message, state: FSMContext,code,data):
+async def handle_oauth_code(message: types.Message, state: FSMContext):
     try:
-
-        logger.info(f"Получен код авторизации: {code}")
-        logger.debug(f"Данные состояния: {data}")
-        logger.info(f"Токен сохранен для пользователя {message.from_user.id}")
-
         code = message.text.strip()
         data = await state.get_data()
 
-        # Проверка наличия данных
+        logger.info(f"Получен код: {code}")
+        logger.debug(f"Данные состояния: {data}")
+
         if not all(key in data for key in ["client_config", "scopes", "redirect_uri"]):
             await message.answer("❌ Сначала отправьте client_secrets.json!")
             return
 
-        # Создание OAuth-потока
         flow = InstalledAppFlow.from_client_config(
             data["client_config"],
             scopes=data["scopes"],
@@ -273,7 +271,6 @@ async def handle_oauth_code(message: types.Message, state: FSMContext,code,data)
         flow.fetch_token(code=code)
         credentials = flow.credentials
 
-        # Сохранение токена
         token_data = {
             "token": credentials.token,
             "refresh_token": credentials.refresh_token,
@@ -286,14 +283,12 @@ async def handle_oauth_code(message: types.Message, state: FSMContext,code,data)
         encrypted = fernet.encrypt(json.dumps(token_data).encode())
         await update_user_data(message.from_user.id, {"youtube_token": encrypted.decode()})
 
-        # Успешное сообщение
-        await message.answer("✅ Авторизация успешна! Теперь вы можете использовать /upload.")
-        await state.clear()  # Очистка состояния
+        await message.answer("✅ Авторизация успешно завершена! Теперь вы можете использовать /upload.")
+        await state.clear()
 
     except Exception as e:
         logger.error(f"Ошибка: {str(e)}", exc_info=True)
         await message.answer("❌ Ошибка авторизации. Попробуйте снова.")
-
 
 @dp.message(Command("guide"))
 async def cmd_guide(message: types.Message):
