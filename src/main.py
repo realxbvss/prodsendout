@@ -192,16 +192,26 @@ async def handle_oauth_file(message: types.Message, state: FSMContext, bot: Bot)
     try:
         file = await bot.get_file(message.document.file_id)
         path = Path("temp") / f"{message.from_user.id}_client_secrets.json"
+        logger.info(f"Сохранение файла по пути: {path}")
         await bot.download_file(file.file_path, path)
+
+        if not path.exists():
+            logger.error("Файл не сохранен!")
+            await message.answer("❌ Ошибка при сохранении файла.")
+            return
+
+        with open(path, "r") as f:
+            content = f.read()
+            logger.debug(f"Содержимое файла: {content}")
 
         # Проверка, что файл является JSON
         with open(path, "r") as f:
             data = json.load(f)  # Если не JSON — вызовет исключение
 
         if "web" not in data or "client_id" not in data["web"]:
-            raise ValueError("Неверная структура client_secrets.json")
-
-
+            logger.error("Неверная структура client_secrets.json")
+            await message.answer("❌ В файле отсутствуют обязательные поля.")
+            return
 
         flow = InstalledAppFlow.from_client_secrets_file(
             str(path),
@@ -215,6 +225,7 @@ async def handle_oauth_file(message: types.Message, state: FSMContext, bot: Bot)
             scopes=flow.scopes,
             redirect_uri=flow.redirect_uri
         )
+        logger.info("Данные OAuth успешно сохранены")
         logger.debug(f"Данные сохранены: {await state.get_data()}")
         await state.set_state(UploadStates.OAUTH_FLOW)  # Явное сохранение
         await message.answer(f"🔑 Авторизуйтесь по ссылке: {auth_url}")
