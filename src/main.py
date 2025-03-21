@@ -80,6 +80,40 @@ class UploadStates(StatesGroup):
 
 
 # ================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ==================
+
+# ================== ЗАГРУЗКА ВИДЕО ==================
+async def upload_video(user_id: int, video_path: str, title: str, description: str) -> str:
+    try:
+        # Получение токена
+        credentials = await get_valid_credentials(user_id)
+        if not credentials:
+            raise ValueError("❌ Токен не найден. Выполните /auth.")
+
+        # Создание клиента YouTube
+        youtube = build("youtube", "v3", credentials=credentials)
+
+        # Загрузка видео
+        request = youtube.videos().insert(
+            part="snippet,status",
+            body={
+                "snippet": {
+                    "title": title,
+                    "description": description,
+                    "categoryId": "22"  # Категория "People & Blogs"
+                },
+                "status": {
+                    "privacyStatus": "private"  # или "public", "unlisted"
+                }
+            },
+            media_body=MediaFileUpload(video_path)
+        )
+        response = request.execute()
+        return response["id"]
+
+    except Exception as e:
+        logger.error(f"Ошибка загрузки видео: {str(e)}", exc_info=True)
+        raise
+
 async def get_user_data(user_id: int) -> Dict:
     try:
         data = await storage.redis.hgetall(f"user:{user_id}")
@@ -248,6 +282,51 @@ async def handle_oauth_file(message: types.Message, state: FSMContext, bot: Bot)
     finally:
         if path:
             path.unlink(missing_ok=True)
+
+@dp.message(Command("upload"))
+async def cmd_upload(message: types.Message, state: FSMContext):
+    try:
+        # Проверка авторизации
+        credentials = await get_valid_credentials(message.from_user.id)
+        if not credentials:
+            await message.answer("❌ Сначала выполните /auth!")
+            return
+
+        # Переход в состояние для загрузки видео
+        await message.answer("📤 Отправьте видео для загрузки на YouTube.")
+        await state.set_state(UploadStates.MEDIA_UPLOAD)
+
+    except Exception as e:
+        logger.error(f"Ошибка /upload: {str(e)}", exc_info=True)
+        await message.answer("⚠️ Произошла ошибка. Попробуйте позже.")
+
+@dp.message(UploadStates.MEDIA_UPLOAD, F.video)
+async def handle_video_upload(message: types.Message, state: FSMContext):
+    try:
+        # Скачивание видео
+        video = message.video
+        file = await bot.get_file(video.file_id)
+        path = Path("temp") / f"{message.from_user.id}_video.mp4"
+        await bot.download_file(file.file_path, path)
+
+        # Загрузка на YouTube
+        await message.answer("⏳ Видео загружается на YouTube...")
+        video_id = await upload_video(
+            user_id=message.from_user.id,
+            video_path=str(path),
+            title="Мое видео",
+            description="Загружено через бота"
+        )
+
+        await message.answer(f"✅ Видео успешно загружено! ID: {video_id}")
+        await state.clear()
+
+    except Exception as e:
+        logger.error(f"Ошибка загрузки видео: {str(e)}", exc_info=True)
+        await message.answer("❌ Не удалось загрузить видео.")
+    finally:
+        if path.exists():
+            path.unlink()
 
 @dp.message(UploadStates.OAUTH_FLOW)
 async def handle_oauth_code(message: types.Message, state: FSMContext):
