@@ -44,7 +44,7 @@ load_dotenv(env_path)
 
 REQUIRED_ENV = ["TELEGRAM_TOKEN", "REDIS_URL", "ENCRYPTION_KEY"]
 if missing := [var for var in REQUIRED_ENV if not os.getenv(var)]:
-    logger.critical(f"Missing environment variables: {missing}")
+    logger.critical(f"Отсутствуют переменные окружения: {missing}")
     sys.exit(1)
 
 try:
@@ -56,9 +56,9 @@ try:
             "health_check_interval": 30
         }
     )
-    logger.info("Redis подключен")
+    logger.info("Успешное подключение к Redis")
 except Exception as e:
-    logger.critical(f"Redis error: {str(e)}")
+    logger.critical(f"Ошибка Redis: {str(e)}")
     sys.exit(1)
 
 bot = Bot(token=os.getenv("TELEGRAM_TOKEN"))
@@ -83,7 +83,7 @@ async def get_user_data(user_id: int) -> Dict:
         data = await storage.redis.hgetall(f"user:{user_id}")
         return {k.decode(): v.decode() for k, v in data.items()}
     except Exception as e:
-        logger.error(f"Redis error: {e}")
+        logger.error(f"Ошибка Redis: {str(e)}")
         return {}
 
 
@@ -91,14 +91,14 @@ async def update_user_data(user_id: int, data: Dict) -> None:
     try:
         await storage.redis.hset(f"user:{user_id}", mapping=data)
     except Exception as e:
-        logger.error(f"Redis update error: {e}")
+        logger.error(f"Ошибка Redis: {str(e)}")
 
 
 async def acquire_lock() -> bool:
     try:
         return await storage.redis.set("bot_lock", "1", nx=True, ex=60)
     except Exception as e:
-        logger.error(f"Lock error: {e}")
+        logger.error(f"Ошибка блокировки: {str(e)}")
         return False
 
 
@@ -106,7 +106,7 @@ async def release_lock():
     try:
         await storage.redis.delete("bot_lock")
     except Exception as e:
-        logger.error(f"Unlock error: {e}")
+        logger.error(f"Ошибка разблокировки: {str(e)}")
 
 
 async def run_subprocess(cmd: list) -> bool:
@@ -119,7 +119,7 @@ async def run_subprocess(cmd: list) -> bool:
         await proc.wait()
         return proc.returncode == 0
     except Exception as e:
-        logger.error(f"Subprocess error: {e}")
+        logger.error(f"Ошибка подпроцесса: {str(e)}")
         return False
 
 
@@ -130,7 +130,7 @@ async def decrypt_user_data(user_id: int, key: str) -> Optional[bytes]:
             return fernet.decrypt(encrypted.encode())
         return None
     except Exception as e:
-        logger.error(f"Decryption error: {e}")
+        logger.error(f"Ошибка дешифрования: {str(e)}")
         return None
 
 
@@ -138,7 +138,7 @@ async def decrypt_user_data(user_id: int, key: str) -> Optional[bytes]:
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
     try:
-        # Исправление ошибки: правильные параметры для set_state
+        # Очистка состояния с корректными параметрами
         await storage.set_state(
             chat=message.chat.id,
             user=message.from_user.id,
@@ -154,8 +154,8 @@ async def cmd_start(message: types.Message):
 
             if time_left.total_seconds() > 0:
                 token_status = (
-                    "\n\n🔐 Статус авторизации: "
-                    f"Действителен еще {time_left // timedelta(hours=1)} ч. "
+                    f"\n\n🔐 Статус авторизации: Действителен еще "
+                    f"{time_left // timedelta(hours=1)} ч. "
                     f"{(time_left % timedelta(hours=1)) // timedelta(minutes=1)} мин."
                 )
             else:
@@ -164,22 +164,23 @@ async def cmd_start(message: types.Message):
         response = (
             "🎥 <b>YouTube Upload Bot</b>\n\n"
             "📚 Основные команды:\n"
-            "▶️ /upload - Начать загрузку\n"
-            "🔑 /auth - Авторизация\n"
-            "⚙️ /view_configs - Конфигурации\n"
-            "🗑️ /delete_config &lt;ключ&gt; - Удалить\n\n"
+            "▶️ /upload - Начать загрузку видео\n"
+            "🔑 /auth - Авторизация в YouTube\n"
+            "⚙️ /view_configs - Показать сохраненные настройки\n"
+            "🗑️ /delete_config &lt;ключ&gt; - Удалить конфигурацию\n\n"
+            "❗️ <b>Перед использованием /upload необходимо выполнить /auth</b>"
             f"{token_status}"
         )
         await message.answer(response, parse_mode="HTML")
 
     except Exception as e:
-        logger.error(f"/start error: {e}", exc_info=True)
-        await message.answer("⚠️ Ошибка. Попробуйте позже.")
+        logger.error(f"Ошибка /start: {str(e)}", exc_info=True)
+        await message.answer("⚠️ Произошла ошибка. Попробуйте позже.")
 
 
 @dp.message(Command("auth"))
 async def cmd_auth(message: types.Message, state: FSMContext):
-    await message.answer("📤 Отправьте client_secrets.json")
+    await message.answer("📤 Отправьте файл client_secrets.json")
     await state.set_state(UploadStates.OAUTH_FLOW)
 
 
@@ -187,7 +188,7 @@ async def cmd_auth(message: types.Message, state: FSMContext):
 async def handle_oauth_file(message: types.Message, state: FSMContext, bot: Bot):
     try:
         file = await bot.get_file(message.document.file_id)
-        path = Path("temp") / f"{message.from_user.id}_secrets.json"
+        path = Path("temp") / f"{message.from_user.id}_client_secrets.json"
         await bot.download_file(file.file_path, path)
 
         flow = InstalledAppFlow.from_client_secrets_file(
@@ -202,11 +203,11 @@ async def handle_oauth_file(message: types.Message, state: FSMContext, bot: Bot)
             client_config=flow.client_config,
             flow=flow.serialize()
         )
-        await message.answer(f"🔑 Авторизуйтесь: {auth_url}")
+        await message.answer(f"🔑 Авторизуйтесь по ссылке: {auth_url}")
         path.unlink()
 
     except Exception as e:
-        logger.error(f"OAuth file error: {e}")
+        logger.error(f"Ошибка авторизации: {str(e)}")
         await message.answer("❌ Неверный формат файла!")
 
 
@@ -216,10 +217,13 @@ async def handle_oauth_code(message: types.Message, state: FSMContext):
         code = message.text.strip()
         data = await state.get_data()
 
-        # Исправление ошибки: правильное восстановление потока
+        if 'client_config' not in data:
+            raise KeyError("client_config отсутствует в данных состояния")
+
         flow = InstalledAppFlow.from_client_config(
             data['client_config'],
-            scopes=["https://www.googleapis.com/auth/youtube.upload"]
+            scopes=["https://www.googleapis.com/auth/youtube.upload"],
+            redirect_uri="urn:ietf:wg:oauth:2.0:oob"
         )
         flow.fetch_token(code=code)
         credentials = flow.credentials
@@ -236,11 +240,11 @@ async def handle_oauth_code(message: types.Message, state: FSMContext):
         encrypted = fernet.encrypt(json.dumps(token_data).encode())
         await update_user_data(message.from_user.id, {'youtube_token': encrypted.decode()})
 
-        await message.answer("✅ Авторизация успешна!")
+        await message.answer("✅ Авторизация успешно завершена!")
         await state.clear()
 
     except Exception as e:
-        logger.error(f"OAuth code error: {e}")
+        logger.error(f"Ошибка токена: {str(e)}")
         await message.answer(f"❌ Ошибка: {str(e)}")
 
 
@@ -248,15 +252,23 @@ async def handle_oauth_code(message: types.Message, state: FSMContext):
 async def cmd_view_configs(message: types.Message):
     try:
         user_data = await get_user_data(message.from_user.id)
-        configs = [f"🔑 {key}" for key in user_data if key.startswith(("vpn:", "proxy"))]
+        configs = []
+
+        for key in user_data:
+            if key.startswith(("vpn:", "proxy", "youtube_token")):
+                configs.append(f"🔑 {key}")
 
         if configs:
-            await message.answer("📂 Конфигурации:\n" + "\n".join(configs))
+            await message.answer(
+                "📂 <b>Сохраненные конфигурации:</b>\n" + "\n".join(configs),
+                parse_mode="HTML"
+            )
         else:
-            await message.answer("❌ Нет конфигураций")
+            await message.answer("❌ Нет сохраненных конфигураций!")
+
     except Exception as e:
-        logger.error(f"View configs error: {e}")
-        await message.answer("⚠️ Ошибка")
+        logger.error(f"Ошибка /view_configs: {str(e)}")
+        await message.answer("⚠️ Ошибка при получении данных.")
 
 
 @dp.message(Command("delete_config"))
@@ -264,16 +276,22 @@ async def cmd_delete_config(message: types.Message):
     try:
         args = message.text.split()
         if len(args) < 2:
-            await message.answer("❌ Укажите ключ")
+            await message.answer("❌ Укажите ключ конфигурации!")
             return
 
-        config_key = args[1]
+        config_key = args[1].strip()
+        user_data = await get_user_data(message.from_user.id)
+
+        if config_key not in user_data:
+            await message.answer(f"❌ Конфигурация '{config_key}' не найдена!")
+            return
+
         await storage.redis.hdel(f"user:{message.from_user.id}", config_key)
-        await message.answer(f"✅ Удалено: {config_key}")
+        await message.answer(f"✅ Конфигурация '{config_key}' удалена!")
 
     except Exception as e:
-        logger.error(f"Delete config error: {e}")
-        await message.answer("⚠️ Ошибка")
+        logger.error(f"Ошибка /delete_config: {str(e)}")
+        await message.answer("⚠️ Ошибка при удалении.")
 
 
 # ================== ЗАГРУЗКА ВИДЕО ==================
@@ -306,7 +324,7 @@ async def get_valid_credentials(user_id: int) -> Optional[Credentials]:
 
         return Credentials(**token_data)
     except Exception as e:
-        logger.error(f"Credentials error: {e}")
+        logger.error(f"Ошибка учетных данных: {str(e)}")
         return None
 
 
@@ -335,7 +353,7 @@ async def main():
         await dp.start_polling(bot)
 
     except Exception as e:
-        logger.critical(f"Critical error: {e}", exc_info=True)
+        logger.critical(f"Критическая ошибка: {str(e)}", exc_info=True)
     finally:
         await release_lock()
         logger.info("Ресурсы освобождены")
