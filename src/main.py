@@ -199,13 +199,14 @@ async def handle_oauth_file(message: types.Message, state: FSMContext, bot: Bot)
 
         await state.update_data(
             client_config=flow.client_config,
-            flow=flow.serialize()
+            scopes=flow.scopes,
+            redirect_uri=flow.redirect_uri
         )
         await message.answer(f"🔑 Авторизуйтесь по ссылке: {auth_url}")
         path.unlink()
 
     except Exception as e:
-        logger.error(f"Ошибка авторизации: {str(e)}")
+        logger.error(f"Ошибка авторизации: {str(e)}", exc_info=True)
         await message.answer("❌ Неверный формат файла!")
 
 
@@ -215,13 +216,10 @@ async def handle_oauth_code(message: types.Message, state: FSMContext):
         code = message.text.strip()
         data = await state.get_data()
 
-        if 'client_config' not in data:
-            raise KeyError("client_config отсутствует в данных состояния")
-
         flow = InstalledAppFlow.from_client_config(
             data['client_config'],
-            scopes=["https://www.googleapis.com/auth/youtube.upload"],
-            redirect_uri="urn:ietf:wg:oauth:2.0:oob"
+            scopes=data['scopes'],
+            redirect_uri=data['redirect_uri']
         )
         flow.fetch_token(code=code)
         credentials = flow.credentials
@@ -242,9 +240,8 @@ async def handle_oauth_code(message: types.Message, state: FSMContext):
         await state.clear()
 
     except Exception as e:
-        logger.error(f"Ошибка токена: {str(e)}")
+        logger.error(f"Ошибка токена: {str(e)}", exc_info=True)
         await message.answer(f"❌ Ошибка: {str(e)}")
-
 
 @dp.message(Command("view_configs"))
 async def cmd_view_configs(message: types.Message):
