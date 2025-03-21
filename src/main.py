@@ -9,6 +9,8 @@ import json
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, Optional
+
+from aiogram.fsm.storage.base import StorageKey
 from dotenv import load_dotenv
 
 from aiogram import Bot, Dispatcher, types, F
@@ -138,11 +140,12 @@ async def decrypt_user_data(user_id: int, key: str) -> Optional[bytes]:
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
     try:
-        # Исправление: правильный вызов set_state
-        await storage.set_state(
-            key=f"fsm:{message.from_user.id}",
-            state=None
+        key = StorageKey(
+            chat_id=message.chat.id,  # ID чата
+            user_id=message.from_user.id,  # ID пользователя
+            bot_id=bot.id  # ID бота
         )
+        await storage.set_state(key=key, state=None)
 
         credentials = await get_valid_credentials(message.from_user.id)
         token_status = ""
