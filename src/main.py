@@ -229,7 +229,7 @@ async def handle_oauth_file(message: types.Message, state: FSMContext, bot: Bot)
         auth_url, _ = flow.authorization_url(prompt="consent")  # Определяем auth_url здесь
 
         await state.update_data(
-            client_config=data["installed"],  # Передаем всю секцию "installed"
+            client_config=data["installed"],  # Важно!
             scopes=["https://www.googleapis.com/auth/youtube.upload"],
             redirect_uri="urn:ietf:wg:oauth:2.0:oob"
         )
@@ -269,7 +269,7 @@ async def handle_oauth_code(message: types.Message, state: FSMContext):
 
         # Создание OAuth-потока с явным указанием client_config
         flow = InstalledAppFlow.from_client_config(
-            client_config=data["client_config"],
+            client_config={"installed": data["client_config"]},
             scopes=data["scopes"],
             redirect_uri=data["redirect_uri"]
         )
