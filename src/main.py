@@ -88,6 +88,8 @@ class UploadStates(StatesGroup):
     VPN_CONFIG = State()          # Настройка VPN для канала
     CHANNEL_SELECT = State()      # Выбор канала
     MULTI_CHANNEL = State()       # Выбор количества каналов (1-10)
+    MULTI_CHANNEL_COUNT = State()  # Выбор количества каналов
+    MULTI_CHANNEL_SETUP = State()  # Настройка каждого канала
 
 
 # ================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ==================
@@ -237,10 +239,18 @@ async def get_user_channels(user_id: int) -> list:
     return []  # Реализуйте логику
 
 async def get_vpn_for_channel(user_id: int, channel_id: str) -> str:
-    return ""  # Реализуйте логику
+    encrypted = await storage.redis.hget(f"user:{user_id}", f"vpn:{channel_id}")
+    return fernet.decrypt(encrypted).decode() if encrypted else ""
 
 def connect_to_vpn(config: str):
-    pass  # Реализуйте логику
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".ovpn") as f:
+        f.write(config.encode())
+        subprocess.run(
+            ["sudo", "openvpn", "--config", f.name],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL
+        )
 
 @dp.message(UploadStates.OAUTH_FLOW, F.document)
 async def handle_oauth_file(message: types.Message, state: FSMContext, bot: Bot):
@@ -329,15 +339,26 @@ async def handle_photo(message: Message, state: FSMContext, bot: Bot):
     await message.answer("🎵 Теперь отправьте MP3-аудио:")
     await state.set_state(UploadStates.AUDIO_UPLOAD)
 
+
 @dp.message(UploadStates.AUDIO_UPLOAD, F.audio)
 async def handle_audio(message: Message, state: FSMContext, bot: Bot):
-    file = await bot.get_file(message.audio.file_id)
-    path = Path("temp") / f"{message.from_user.id}_audio.mp3"
-    await bot.download_file(file.file_path, path)
-    await state.update_data(audio_path=str(path))
-    await message.answer("⏳ Создаю видео...")
-    await state.set_state(UploadStates.VIDEO_GENERATION)
-    await generate_video(message.from_user.id, state)
+    try:
+        file = await bot.get_file(message.audio.file_id)
+        path = Path("temp") / f"{message.from_user.id}_audio.mp3"
+        await bot.download_file(file.file_path, path)
+
+        # Проверка длительности аудио
+        audio = AudioFileClip(str(path))
+        if audio.duration > 600:  # 10 минут максимум
+            await message.answer("❌ Аудио должно быть короче 10 минут!")
+            return
+
+        await state.update_data(audio_path=str(path))
+        await message.answer("⏳ Создаю видео...")
+        await state.set_state(UploadStates.VIDEO_GENERATION)
+        await generate_video(message.from_user.id, state)
+    except Exception as e:
+        await message.answer(f"❌ Ошибка: {str(e)}")
 
 @dp.callback_query(UploadStates.CONTENT_TYPE, F.data.in_(["ready_video", "photo_audio"]))
 async def handle_content_type(callback: CallbackQuery, state: FSMContext):
@@ -349,15 +370,25 @@ async def handle_content_type(callback: CallbackQuery, state: FSMContext):
         await state.set_state(UploadStates.PHOTO_UPLOAD)
     await callback.answer()
 
+@dp.callback_query(UploadStates.CONTENT_TYPE, F.data == "multi_channel")
+async def handle_multi_channel(callback: CallbackQuery, state: FSMContext):
+    await callback.message.answer("Сколько каналов вы хотите использовать? (1-10)")
+    await state.set_state(UploadStates.MULTI_CHANNEL_COUNT)
+    await callback.answer()
+
 @dp.message(Command("upload"))
 async def cmd_upload(message: types.Message, state: FSMContext):
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Готовое видео", callback_data="ready_video")],
-        [InlineKeyboardButton(text="Фото + MP3", callback_data="photo_audio")],
+        [
+            InlineKeyboardButton(text="Готовое видео", callback_data="ready_video"),
+            InlineKeyboardButton(text="Фото + MP3", callback_data="photo_audio")
+        ],
+        [
+            InlineKeyboardButton(text="Мультиканальная загрузка", callback_data="multi_channel")
+        ]
     ])
     await message.answer("📤 Выберите тип контента:", reply_markup=keyboard)
     await state.set_state(UploadStates.CONTENT_TYPE)
-
 @dp.message(UploadStates.MEDIA_UPLOAD, F.video)
 async def handle_video_upload(message: types.Message, state: FSMContext):
     try:
@@ -391,11 +422,103 @@ async def cmd_vpn(message: Message, state: FSMContext):
     await message.answer("🔐 Отправьте конфиг VPN в формате .ovpn:")
     await state.set_state(UploadStates.VPN_CONFIG)
 
-@dp.message(UploadStates.VPN_CONFIG, F.document)
-async def handle_vpn_config(message: Message, _state: FSMContext, _bot: Bot):
-    # Сохранение конфига и привязка к каналу
-    ...
+async def save_vpn_config(user_id: int, channel_id: str, config: str):
+    encrypted = fernet.encrypt(config.encode())
+    await storage.redis.hset(
+        f"user:{user_id}",
+        f"vpn:{channel_id}",
+        encrypted.decode()
+    )
 
+
+@dp.message(UploadStates.VPN_CONFIG, F.document)
+async def handle_vpn_config(message: Message, state: FSMContext, bot: Bot):
+    try:
+        file = await bot.get_file(message.document.file_id)
+        path = Path("temp") / f"{message.from_user.id}_vpn.ovpn"
+        await bot.download_file(file.file_path, path)
+
+        # Проверка валидности конфига
+        with open(path, "r") as f:
+            if "remote" not in f.read():
+                await message.answer("❌ Неверный формат VPN-конфига!")
+                return
+
+        data = await state.get_data()
+        channel_id = data.get("current_channel")
+
+        await save_vpn_config(message.from_user.id, channel_id, path.read_text())
+        await message.answer(f"✅ VPN для канала {channel_id} сохранен!")
+
+    except Exception as e:
+        await message.answer(f"❌ Ошибка: {str(e)}")
+    finally:
+        path.unlink(missing_ok=True)
+
+
+# Обработчик выбора количества каналов
+@dp.callback_query(UploadStates.MULTI_CHANNEL)
+async def handle_multi_channel(callback: CallbackQuery, state: FSMContext):
+    await callback.message.answer("Введите количество каналов (1-10):")
+    await state.set_state(UploadStates.MULTI_CHANNEL_COUNT)
+
+
+# Обработчик настройки каналов
+@dp.message(UploadStates.MULTI_CHANNEL_COUNT)
+async def handle_channel_setup(message: Message, state: FSMContext):
+    try:
+        count = int(message.text)
+        if not 1 <= count <= 10:
+            raise ValueError
+
+        await state.update_data(channel_count=count, current_channel=1)
+        await message.answer(f"Настройка канала 1/{count}\nВведите название канала:")
+        await state.set_state(UploadStates.MULTI_CHANNEL_SETUP)
+
+    except:
+        await message.answer("❌ Введите число от 1 до 10!")
+
+
+# Циклическая настройка каналов
+@dp.message(UploadStates.MULTI_CHANNEL_SETUP)
+async def handle_channel_config(message: Message, state: FSMContext):
+    data = await state.get_data()
+    current = data["current_channel"]
+    total = data["channel_count"]
+
+    # Сохраняем название канала
+    await storage.redis.hset(
+        f"user:{message.from_user.id}:channels",
+        f"channel_{current}",
+        message.text
+    )
+
+    if current < total:
+        await state.update_data(current_channel=current + 1)
+        await message.answer(
+            f"Настройка канала {current + 1}/{total}\nВведите название канала:"
+        )
+    else:
+        await message.answer("✅ Все каналы настроены! Теперь загрузите VPN-конфиги.")
+        await state.set_state(UploadStates.VPN_CONFIG)
+
+
+async def upload_to_multiple_channels(user_id: int, video_path: str):
+    channels = await storage.redis.hgetall(f"user:{user_id}:channels")
+    for channel_num, channel_name in channels.items():
+        channel_id = channel_num.decode().split("_")[1]
+
+        # Подключение VPN
+        vpn_config = await get_vpn_for_channel(user_id, channel_id)
+        connect_to_vpn(vpn_config)
+
+        # Загрузка видео
+        await upload_to_youtube(user_id, video_path, channel_id)
+
+        await bot.send_message(
+            user_id,
+            f"✅ Видео загружено на канал: {channel_name.decode()}"
+        )
 
 @dp.message(UploadStates.CHANNEL_SELECT)
 async def handle_channel_select(message: Message, state: FSMContext):

@@ -21,6 +21,7 @@ google-auth-httplib2==0.2.0
 google-auth-oauthlib==1.2.1
 googleapis-common-protos==1.69.1
 python-dotenv==1.0.0
+openvpn-api==0.3.0
 moviepy==1.0.3
 h11==0.14.0
 httpcore==1.0.7
