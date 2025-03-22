@@ -88,8 +88,6 @@ class UploadStates(StatesGroup):
     VPN_CONFIG = State()          # Настройка VPN для канала
     CHANNEL_SELECT = State()      # Выбор канала
     MULTI_CHANNEL = State()       # Выбор количества каналов (1-10)
-    MULTI_CHANNEL_COUNT = State()  # Выбор количества каналов
-    MULTI_CHANNEL_SETUP = State()  # Настройка каждого канала
 
 
 # ================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ==================
@@ -214,6 +212,7 @@ async def cmd_start(message: types.Message):
         response = (
             "🎥 <b>YouTube Upload Bot</b>\n\n"
             "📚 Основные команды:\n"
+            "⚙️ /guide - Показать инструкцию\n"
             "▶️ /upload - Начать загрузку видео\n"
             "🔑 /auth - Авторизация в YouTube\n"
             "⚙️ /view_configs - Показать сохраненные настройки\n"
@@ -259,10 +258,54 @@ async def get_user_channels(user_id: int) -> list:
     channels = await storage.redis.hgetall(f"user:{user_id}:channels")
     return [(k.decode(), v.decode()) for k, v in channels.items()]
 
+
 @dp.message(Command("setup_channels"))
 async def cmd_setup_channels(message: Message, state: FSMContext):
-    await message.answer("🔢 Сколько каналов вы хотите добавить? (1-10)")
-    await state.set_state(UploadStates.MULTI_CHANNEL_COUNT)
+    # Получаем каналы через API
+    channels = await get_youtube_channels(message.from_user.id)
+
+    if not channels:
+        await message.answer("❌ Нет доступных каналов. Сначала выполните /auth")
+        return
+
+    # Сохраняем каналы
+    await storage.redis.hset(
+        f"user:{message.from_user.id}:channels",
+        mapping={channel_id: name for channel_id, name in channels}
+    )
+
+    await message.answer(
+        "✅ Ваши каналы автоматически получены!\n"
+        "Теперь загрузите VPN-конфиги для каждого канала через /setup_vpn"
+    )
+
+
+@dp.message(Command("setup_vpn"))
+async def cmd_setup_vpn(message: Message, state: FSMContext):
+    channels = await get_user_channels(message.from_user.id)
+    if not channels:
+        await message.answer("❌ Сначала настройте каналы через /setup_channels")
+        return
+
+    await state.update_data(channels=channels, current_channel=0)
+    await ask_for_vpn_config(message, state)
+
+
+async def ask_for_vpn_config(message: Message, state: FSMContext):
+    data = await state.get_data()
+    current = data["current_channel"] + 1
+    channels = data["channels"]
+
+    if current <= len(channels):
+        channel_id, channel_name = channels[current - 1]
+        await message.answer(
+            f"🔐 Отправьте VPN-конфиг для канала: {channel_name}\n"
+            f"(Используйте файл в формате .ovpn)"
+        )
+        await state.update_data(current_channel=current, current_channel_id=channel_id)
+    else:
+        await message.answer("✅ Все VPN-конфиги успешно сохранены!")
+        await state.clear()
 
 @dp.message(UploadStates.OAUTH_FLOW, F.document)
 async def handle_oauth_file(message: types.Message, state: FSMContext, bot: Bot):
@@ -453,23 +496,21 @@ async def save_vpn_config(user_id: int, channel_id: str, config: str):
 
 
 @dp.message(UploadStates.VPN_CONFIG, F.document)
-async def handle_vpn_config(message: Message, state: FSMContext, bot: Bot):  # Было _state и _bot
+async def handle_vpn_config(message: Message, state: FSMContext):
     try:
+        data = await state.get_data()
+        channel_id = data["current_channel_id"]
+
+        # Скачивание и сохранение конфига
         file = await bot.get_file(message.document.file_id)
         path = Path("temp") / f"{message.from_user.id}_vpn.ovpn"
         await bot.download_file(file.file_path, path)
 
-        # Проверка валидности конфига
         with open(path, "r") as f:
-            if "remote" not in f.read():
-                await message.answer("❌ Неверный формат VPN-конфига!")
-                return
+            config = f.read()
 
-        data = await state.get_data()  # Теперь используем корректное имя параметра
-        channel_id = data.get("current_channel")
-
-        await save_vpn_config(message.from_user.id, channel_id, path.read_text())
-        await message.answer(f"✅ VPN для канала {channel_id} сохранен!")
+        await save_vpn_config(message.from_user.id, channel_id, config)
+        await ask_for_vpn_config(message, state)  # Запрашиваем следующий конфиг
 
     except Exception as e:
         await message.answer(f"❌ Ошибка: {str(e)}")
@@ -539,6 +580,25 @@ async def upload_to_multiple_channels(user_id: int, video_path: str):
             user_id,
             f"✅ Видео загружено на канал: {channel_name.decode()}"
         )
+
+async def get_youtube_channels(user_id: int) -> list:
+    """Получает список каналов пользователя через YouTube API"""
+    credentials = await get_valid_credentials(user_id)
+    if not credentials:
+        return []
+
+    youtube = build("youtube", "v3", credentials=credentials)
+    request = youtube.channels().list(
+        part="snippet",
+        mine=True
+    )
+    response = request.execute()
+    return [
+        (item["id"], item["snippet"]["title"])
+        for item in response.get("items", [])
+    ]
+
+
 
 @dp.message(UploadStates.CHANNEL_SELECT)
 async def handle_channel_select(message: Message, state: FSMContext):
@@ -650,12 +710,11 @@ async def handle_oauth_code(message: types.Message, state: FSMContext):
 @dp.message(Command("guide"))
 async def cmd_guide(message: types.Message):
     instructions = (
-        "📚 **Инструкция по использованию бота:**\n\n"
-        "1. Для авторизации используйте команду `/auth` и отправьте файл `client_secrets.json`.\n"
-        "2. Чтобы загрузить видео, используйте `/upload`.\n"
-        "3. Просмотрите сохранённые настройки через `/view_configs`.\n"
-        "4. Удалите ненужные настройки командой `/delete_config <ключ>`.\n\n"
-        "❓ Если что-то не работает, напишите в поддержку."
+        "📚 **Новая инструкция:**\n"
+        "1. /auth - Авторизация в YouTube\n"
+        "2. /setup_channels - Получить ваши каналы\n"
+        "3. /setup_vpn - Настроить VPN для каналов\n"
+        "4. /upload - Начать загрузку\n"
     )
     await message.answer(instructions, parse_mode="Markdown")
 
