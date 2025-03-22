@@ -10,7 +10,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, Optional
 
-from aiogram.fsm.storage.base import StorageKey
+from aiogram.exceptions import TelegramBadRequest
 from dotenv import load_dotenv
 
 from aiogram import Bot, Dispatcher, types, F
@@ -26,6 +26,15 @@ from google_auth_oauthlib.flow import InstalledAppFlow
 from google.oauth2.credentials import Credentials
 from google.auth.transport.requests import Request
 from cryptography.fernet import Fernet
+
+from moviepy.editor import ImageClip, AudioFileClip
+
+from aiogram.types import (
+    Message,
+    CallbackQuery,
+    InlineKeyboardMarkup,
+    InlineKeyboardButton
+)
 
 # ================== ИНИЦИАЛИЗАЦИЯ ==================
 Path("temp").mkdir(exist_ok=True)
@@ -70,13 +79,15 @@ fernet = Fernet(os.getenv("ENCRYPTION_KEY").encode())
 
 # ================== СОСТОЯНИЯ ==================
 class UploadStates(StatesGroup):
-    CONTENT_TYPE = State()
-    MEDIA_UPLOAD = State()
-    METADATA = State()
-    VPN_CONFIG = State()
-    PROXY = State()
-    YOUTUBE_TOKEN = State()
     OAUTH_FLOW = State()
+    CONTENT_TYPE = State()        # Выбор типа контента
+    MEDIA_UPLOAD = State()        # Загрузка готового видео
+    PHOTO_UPLOAD = State()        # Загрузка фото
+    AUDIO_UPLOAD = State()        # Загрузка аудио
+    VIDEO_GENERATION = State()    # Генерация видео из фото+MP3
+    VPN_CONFIG = State()          # Настройка VPN для канала
+    CHANNEL_SELECT = State()      # Выбор канала
+    MULTI_CHANNEL = State()       # Выбор количества каналов (1-10)
 
 
 # ================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ==================
@@ -185,8 +196,9 @@ async def cmd_start(message: types.Message):
         token_status = ""
 
         if credentials:
-            expiry_time = credentials.expiry.replace(tzinfo=None)
-            time_left = expiry_time - datetime.utcnow()
+            from datetime import datetime, timezone
+            expiry_time = credentials.expiry.replace(tzinfo=timezone.utc)
+            time_left = expiry_time - datetime.now(timezone.utc)
 
             if time_left.total_seconds() > 0:
                 token_status = (
@@ -219,6 +231,16 @@ async def cmd_auth(message: types.Message, state: FSMContext):
     await state.clear()
     await message.answer("📤 Отправьте файл client_secrets.json.")
     await state.set_state(UploadStates.OAUTH_FLOW)
+
+# Добавьте в код (заглушки):
+async def get_user_channels(user_id: int) -> list:
+    return []  # Реализуйте логику
+
+async def get_vpn_for_channel(user_id: int, channel_id: str) -> str:
+    return ""  # Реализуйте логику
+
+def connect_to_vpn(config: str):
+    pass  # Реализуйте логику
 
 @dp.message(UploadStates.OAUTH_FLOW, F.document)
 async def handle_oauth_file(message: types.Message, state: FSMContext, bot: Bot):
@@ -283,22 +305,58 @@ async def handle_oauth_file(message: types.Message, state: FSMContext, bot: Bot)
         if path:
             path.unlink(missing_ok=True)
 
+async def generate_video(user_id: int, state: FSMContext):
+    data = await state.get_data()
+    output_path = Path("temp") / f"{user_id}_video.mp4"
+
+    try:
+        audio = AudioFileClip(data["audio_path"])
+        clip = ImageClip(data["photo_path"]).set_duration(audio.duration)
+        clip = clip.set_audio(audio)
+        clip.write_videofile(str(output_path), fps=24)
+        await state.update_data(video_path=str(output_path))
+        await bot.send_message(user_id, "✅ Видео готово! Теперь выберите канал для загрузки.")
+        await state.set_state(UploadStates.CHANNEL_SELECT)
+    except Exception as e:
+        await bot.send_message(user_id, f"❌ Ошибка: {str(e)}")
+
+@dp.message(UploadStates.PHOTO_UPLOAD, F.photo)
+async def handle_photo(message: Message, state: FSMContext, bot: Bot):
+    file = await bot.get_file(message.photo[-1].file_id)
+    path = Path("temp") / f"{message.from_user.id}_photo.jpg"
+    await bot.download_file(file.file_path, path)
+    await state.update_data(photo_path=str(path))
+    await message.answer("🎵 Теперь отправьте MP3-аудио:")
+    await state.set_state(UploadStates.AUDIO_UPLOAD)
+
+@dp.message(UploadStates.AUDIO_UPLOAD, F.audio)
+async def handle_audio(message: Message, state: FSMContext, bot: Bot):
+    file = await bot.get_file(message.audio.file_id)
+    path = Path("temp") / f"{message.from_user.id}_audio.mp3"
+    await bot.download_file(file.file_path, path)
+    await state.update_data(audio_path=str(path))
+    await message.answer("⏳ Создаю видео...")
+    await state.set_state(UploadStates.VIDEO_GENERATION)
+    await generate_video(message.from_user.id, state)
+
+@dp.callback_query(UploadStates.CONTENT_TYPE, F.data.in_(["ready_video", "photo_audio"]))
+async def handle_content_type(callback: CallbackQuery, state: FSMContext):
+    if callback.data == "ready_video":
+        await callback.message.answer("📤 Отправьте видео:")
+        await state.set_state(UploadStates.MEDIA_UPLOAD)
+    else:
+        await callback.message.answer("📤 Отправьте фото:")
+        await state.set_state(UploadStates.PHOTO_UPLOAD)
+    await callback.answer()
+
 @dp.message(Command("upload"))
 async def cmd_upload(message: types.Message, state: FSMContext):
-    try:
-        # Проверка авторизации
-        credentials = await get_valid_credentials(message.from_user.id)
-        if not credentials:
-            await message.answer("❌ Сначала выполните /auth!")
-            return
-
-        # Переход в состояние для загрузки видео
-        await message.answer("📤 Отправьте видео для загрузки на YouTube.")
-        await state.set_state(UploadStates.MEDIA_UPLOAD)
-
-    except Exception as e:
-        logger.error(f"Ошибка /upload: {str(e)}", exc_info=True)
-        await message.answer("⚠️ Произошла ошибка. Попробуйте позже.")
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Готовое видео", callback_data="ready_video")],
+        [InlineKeyboardButton(text="Фото + MP3", callback_data="photo_audio")],
+    ])
+    await message.answer("📤 Выберите тип контента:", reply_markup=keyboard)
+    await state.set_state(UploadStates.CONTENT_TYPE)
 
 @dp.message(UploadStates.MEDIA_UPLOAD, F.video)
 async def handle_video_upload(message: types.Message, state: FSMContext):
@@ -327,6 +385,44 @@ async def handle_video_upload(message: types.Message, state: FSMContext):
     finally:
         if path.exists():
             path.unlink()
+
+@dp.message(Command("vpn"))
+async def cmd_vpn(message: Message, state: FSMContext):
+    await message.answer("🔐 Отправьте конфиг VPN в формате .ovpn:")
+    await state.set_state(UploadStates.VPN_CONFIG)
+
+@dp.message(UploadStates.VPN_CONFIG, F.document)
+async def handle_vpn_config(message: Message, _state: FSMContext, _bot: Bot):
+    # Сохранение конфига и привязка к каналу
+    ...
+
+
+@dp.message(UploadStates.CHANNEL_SELECT)
+async def handle_channel_select(message: Message, state: FSMContext):
+    channels = await get_user_channels(message.from_user.id)
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=name, callback_data=id)] for id, name in channels
+    ])
+    await message.answer("📡 Выберите канал:", reply_markup=keyboard)
+
+
+@dp.callback_query(UploadStates.CHANNEL_SELECT)
+async def handle_channel_upload(callback: CallbackQuery, state: FSMContext):
+    channel_id = callback.data
+    data = await state.get_data()
+
+    # Подключение к VPN
+    vpn_config = await get_vpn_for_channel(callback.from_user.id, channel_id)
+    connect_to_vpn(vpn_config)
+
+    # Загрузка видео
+    await upload_to_youtube(
+        user_id=callback.from_user.id,
+        video_path=data["video_path"],
+        channel_id=channel_id
+    )
+    await callback.message.answer("✅ Видео загружено!")
+    await state.clear()
 
 @dp.message(UploadStates.OAUTH_FLOW)
 async def handle_oauth_code(message: types.Message, state: FSMContext):
