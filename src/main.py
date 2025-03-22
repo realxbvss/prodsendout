@@ -6,12 +6,15 @@ import subprocess
 import asyncio
 import signal
 import json
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from datetime import datetime, timedelta, timezone
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, Optional
 from aiogram.fsm.storage.base import StorageKey  # Добавить в импорты
 from aiogram.exceptions import TelegramBadRequest
+from aiogram.utils import keyboard
 from dotenv import load_dotenv
 
 from aiogram import Bot, Dispatcher, types, F
@@ -292,6 +295,8 @@ async def get_vpn_for_channel(user_id: int, channel_id: str) -> str:
 
 def connect_to_vpn(config: str):
     try:
+        if not config.startswith("client"):
+            raise ValueError("Неверный формат конфига OpenVPN")
         with tempfile.NamedTemporaryFile(delete=False, suffix=".ovpn") as f:
             f.write(config.encode())
             f.flush()  # Важно для записи на диск
@@ -309,12 +314,15 @@ def connect_to_vpn(config: str):
         return True
     except subprocess.CalledProcessError as e:
         error_msg = f"Ошибка подключения: {e.stderr.strip()}"
+        if "AUTH_FAILED" in error_msg:
+            error_msg += "\n🔑 Неверные учетные данные VPN"
         logger.error(error_msg)
         raise ValueError(error_msg)
     except subprocess.TimeoutExpired:
         error_msg = "Таймаут подключения к VPN"
         logger.error(error_msg)
         raise ValueError(error_msg)
+
     finally:
         if 'f' in locals():
             os.unlink(f.name)  # Удаляем временный файл
@@ -490,7 +498,8 @@ async def handle_metadata(message: Message, state: FSMContext):
             parse(publish_time)
             is_scheduled = True
         else:
-            publish_time = datetime.utcnow().isoformat() + "Z"
+            from datetime import UTC
+            publish_time = datetime.now(UTC).isoformat().replace("+00:00", "Z")
             is_scheduled = False
 
         await state.update_data(
@@ -667,22 +676,25 @@ async def upload_to_multiple_channels(user_id: int, video_path: str, state: FSMC
         )
 
 async def get_youtube_channels(user_id: int) -> list:
-    """Получает список каналов пользователя через YouTube API"""
-    credentials = await get_valid_credentials(user_id)
-    if not credentials:
+    try:
+        credentials = await get_valid_credentials(user_id)
+        if not credentials:
+            return []
+
+        youtube = build("youtube", "v3", credentials=credentials)
+        request = youtube.channels().list(
+            part="snippet",
+            mine=True
+        )
+        response = request.execute()
+        return [
+            (item["id"], item["snippet"]["title"])
+            for item in response.get("items", [])
+            if item["id"] and item["snippet"]["title"]
+        ]
+    except Exception as e:
+        logger.error(f"Ошибка получения каналов: {str(e)}")
         return []
-
-    youtube = build("youtube", "v3", credentials=credentials)
-    request = youtube.channels().list(
-        part="snippet",
-        mine=True
-    )
-    response = request.execute()
-    return [
-        (item["id"], item["snippet"]["title"])
-        for item in response.get("items", [])
-    ]
-
 
 
 @dp.message(UploadStates.CHANNEL_SELECT)
@@ -728,46 +740,39 @@ async def upload_to_youtube(user_id: int, video_path: str, channel_id: str, meta
 
 
 @dp.callback_query(UploadStates.CHANNEL_SELECT)
-async def handle_channel_upload(callback: CallbackQuery, state: FSMContext):
-    data = await state.get_data()
-    channel_id = callback.data
-    data = await state.get_data()
-
-    await upload_to_multiple_channels(
-        user_id=callback.from_user.id,
-        video_path=data["video_path"],
-        state=state
-    )
-
+async def handle_channel_selection(callback: CallbackQuery, state: FSMContext):
     try:
-        # Получаем и проверяем VPN-конфиг
-        vpn_config = await get_vpn_for_channel(callback.from_user.id, channel_id)
-        if not vpn_config:
-            await callback.message.answer("❌ Для этого канала не настроен VPN!")
-            return
+        channel_id = callback.data
+        channels = await get_youtube_channels(callback.from_user.id)
+        channel_name = next((name for id, name in channels if id == channel_id), "Неизвестный канал")
 
-        if 'vpn_config' in data:
-            connect_to_vpn(data['vpn_config']['data'])
-
-        # Пробуем подключиться
-        connect_to_vpn(vpn_config)
-
-        # Загружаем видео
-        video_id = await upload_to_youtube(
-            user_id=callback.from_user.id,
-            video_path=data["video_path"],
-            channel_id=channel_id
+        await state.update_data(
+            selected_channel=channel_id,
+            channel_name=channel_name
         )
 
-        await callback.message.answer(f"✅ Видео загружено! ID: {video_id}")
+        await callback.message.edit_text(f"✅ Выбран канал: {channel_name}")
+        await show_content_type_menu(callback.message)
 
-    except ValueError as e:
-        await callback.message.answer(f"❌ VPN Error: {str(e)}")
     except Exception as e:
-        logger.error(f"Ошибка: {str(e)}", exc_info=True)
-        await callback.message.answer("⚠️ Произошла ошибка при загрузке")
+        logger.error(f"Ошибка выбора канала: {str(e)}")
+        await callback.message.answer("⚠️ Ошибка выбора канала")
 
-    await state.clear()
+
+async def show_content_type_menu(message: Message, state: FSMContext):
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="Готовое видео", callback_data="ready_video"),
+                InlineKeyboardButton(text="Фото + MP3", callback_data="photo_audio")
+            ],
+            [
+                InlineKeyboardButton(text="Мультиканальная загрузка", callback_data="multi_channel")
+            ]
+        ]
+    )
+    await message.answer("📤 Выберите тип контента:", reply_markup=keyboard)
+    await state.set_state(UploadStates.CONTENT_TYPE)
 
 @dp.message(UploadStates.OAUTH_FLOW)
 async def handle_oauth_code(message: types.Message, state: FSMContext):
@@ -814,9 +819,65 @@ async def handle_oauth_code(message: types.Message, state: FSMContext):
         await message.answer("✅ Авторизация успешно завершена! Теперь вы можете использовать /upload.")
         await state.clear()
 
+        channels = await get_youtube_channels(message.from_user.id)
+        if not channels:
+            await message.answer("❌ Нет доступных каналов.")
+            return
+
+        if len(channels) == 1:
+            await state.update_data(selected_channel=channels[0][0])
+            await message.answer(f"🎯 Автоматически выбран канал: {channels[0][1]}")
+            await show_content_type_menu(message)
+        else:
+            await show_channel_selection(message, channels, state)
+
+        await message.answer("📡 Выберите канал для загрузки:", reply_markup=keyboard)
+        await state.set_state(UploadStates.CHANNEL_SELECT)
+
     except Exception as e:
         logger.error(f"Ошибка: {str(e)}", exc_info=True)
         await message.answer("❌ Ошибка авторизации. Проверьте код и попробуйте снова.")
+
+
+async def show_channel_selection(message: Message, channels: list, state: FSMContext):
+    try:
+        if not channels:
+            await message.answer("❌ Нет доступных каналов")
+            return
+
+        # Генерируем кнопки
+        buttons = []
+        for channel_id, channel_name in channels:
+            buttons.append(
+                [InlineKeyboardButton(text=channel_name, callback_data=channel_id)]
+            )
+
+        keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
+        await message.answer("📡 Выберите канал:", reply_markup=keyboard)
+        await state.set_state(UploadStates.CHANNEL_SELECT)
+
+    except Exception as e:
+        logger.error(f"Ошибка формирования списка каналов: {str(e)}")
+        await message.answer("⚠️ Ошибка при загрузке списка каналов")
+
+@dp.message(Command("refresh_channels"))
+async def cmd_refresh_channels(message: Message, state: FSMContext):
+    await state.clear()
+    try:
+        channels = await get_youtube_channels(message.from_user.id)
+        if channels:
+            await show_channel_selection(message, channels, state)
+        else:
+            await message.answer("❌ Нет доступных каналов.")
+    except Exception as e:
+        await message.answer("⚠️ Ошибка обновления списка каналов")
+
+async def reset_state_handler(message: Message, state: FSMContext):
+    await state.clear()
+    await message.answer("♻️ Предыдущая операция отменена")
+
+# Регистрируем для основных команд
+dp.message.register(reset_state_handler, Command(commands=["start", "auth", "upload", "refresh_channels"]))
 
 @dp.message(Command("guide"))
 async def cmd_guide(message: types.Message):
