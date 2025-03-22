@@ -9,7 +9,7 @@ import json
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, Optional
-
+from aiogram.fsm.storage.base import StorageKey  # Добавить в импорты
 from aiogram.exceptions import TelegramBadRequest
 from dotenv import load_dotenv
 
@@ -252,6 +252,18 @@ def connect_to_vpn(config: str):
             stderr=subprocess.DEVNULL
         )
 
+async def save_channel(user_id: int, channel_name: str, channel_id: str):
+    await storage.redis.hset(f"user:{user_id}:channels", channel_id, channel_name)
+
+async def get_user_channels(user_id: int) -> list:
+    channels = await storage.redis.hgetall(f"user:{user_id}:channels")
+    return [(k.decode(), v.decode()) for k, v in channels.items()]
+
+@dp.message(Command("setup_channels"))
+async def cmd_setup_channels(message: Message, state: FSMContext):
+    await message.answer("🔢 Сколько каналов вы хотите добавить? (1-10)")
+    await state.set_state(UploadStates.MULTI_CHANNEL_COUNT)
+
 @dp.message(UploadStates.OAUTH_FLOW, F.document)
 async def handle_oauth_file(message: types.Message, state: FSMContext, bot: Bot):
     path = None
@@ -325,10 +337,19 @@ async def generate_video(user_id: int, state: FSMContext):
         clip = clip.set_audio(audio)
         clip.write_videofile(str(output_path), fps=24)
         await state.update_data(video_path=str(output_path))
-        await bot.send_message(user_id, "✅ Видео готово! Теперь выберите канал для загрузки.")
+        await bot.send_message(
+            user_id,
+            "✅ Видео готово!\n"
+            "1. Чтобы выбрать канал, используйте /channel_select\n"
+            "2. Для настройки новых каналов: /setup_channels"
+        )
         await state.set_state(UploadStates.CHANNEL_SELECT)
     except Exception as e:
         await bot.send_message(user_id, f"❌ Ошибка: {str(e)}")
+
+@dp.message(Command("channel_select"))
+async def cmd_channel_select(message: Message):
+    await handle_channel_select(message, None)
 
 @dp.message(UploadStates.PHOTO_UPLOAD, F.photo)
 async def handle_photo(message: Message, state: FSMContext, bot: Bot):
@@ -432,7 +453,7 @@ async def save_vpn_config(user_id: int, channel_id: str, config: str):
 
 
 @dp.message(UploadStates.VPN_CONFIG, F.document)
-async def handle_vpn_config(message: Message, state: FSMContext, bot: Bot):
+async def handle_vpn_config(message: Message, state: FSMContext, bot: Bot):  # Было _state и _bot
     try:
         file = await bot.get_file(message.document.file_id)
         path = Path("temp") / f"{message.from_user.id}_vpn.ovpn"
@@ -444,7 +465,7 @@ async def handle_vpn_config(message: Message, state: FSMContext, bot: Bot):
                 await message.answer("❌ Неверный формат VPN-конфига!")
                 return
 
-        data = await state.get_data()
+        data = await state.get_data()  # Теперь используем корректное имя параметра
         channel_id = data.get("current_channel")
 
         await save_vpn_config(message.from_user.id, channel_id, path.read_text())
@@ -454,7 +475,6 @@ async def handle_vpn_config(message: Message, state: FSMContext, bot: Bot):
         await message.answer(f"❌ Ошибка: {str(e)}")
     finally:
         path.unlink(missing_ok=True)
-
 
 # Обработчик выбора количества каналов
 @dp.callback_query(UploadStates.MULTI_CHANNEL)
@@ -522,12 +542,43 @@ async def upload_to_multiple_channels(user_id: int, video_path: str):
 
 @dp.message(UploadStates.CHANNEL_SELECT)
 async def handle_channel_select(message: Message, state: FSMContext):
-    channels = await get_user_channels(message.from_user.id)
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=name, callback_data=id)] for id, name in channels
-    ])
-    await message.answer("📡 Выберите канал:", reply_markup=keyboard)
+    try:
+        channels = await get_user_channels(message.from_user.id)
+        if not channels:
+            await message.answer("❌ Каналы не настроены! Используйте /setup_channels")
+            return
 
+        keyboard = InlineKeyboardMarkup(
+            inline_keyboard=[[InlineKeyboardButton(text=name, callback_data=id)]
+                             for id, name in channels])
+        await message.answer("📡 Выберите канал:", reply_markup=keyboard)
+    except Exception as e:
+        await message.answer(f"❌ Ошибка: {str(e)}")
+
+
+async def upload_to_youtube(user_id: int, video_path: str, channel_id: str):
+    try:
+        credentials = await get_valid_credentials(user_id)
+        if not credentials:
+            raise ValueError("❌ Токен не найден")
+
+        youtube = build("youtube", "v3", credentials=credentials)
+        request = youtube.videos().insert(
+            part="snippet,status",
+            body={
+                "snippet": {
+                    "title": f"Video for {channel_id}",
+                    "description": "Загружено через бота",
+                    "categoryId": "22"
+                },
+                "status": {"privacyStatus": "private"}
+            },
+            media_body=MediaFileUpload(video_path)
+        )
+        response = request.execute()
+        return response["id"]
+    except Exception as e:
+        logger.error(f"Ошибка загрузки: {str(e)}")
 
 @dp.callback_query(UploadStates.CHANNEL_SELECT)
 async def handle_channel_upload(callback: CallbackQuery, state: FSMContext):

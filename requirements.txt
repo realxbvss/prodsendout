@@ -9,6 +9,11 @@ attrs==25.1.0
 cachetools==5.5.2
 certifi==2025.1.31
 cffi==1.17.1
+aiogram==3.18.0
+google-api-python-client==2.163.0
+moviepy==1.0.3
+cryptography==44.0.2
+python-dotenv==1.0.0
 charset-normalizer==3.4.1
 cryptography==44.0.2
 ffmpeg-python==0.2.0
