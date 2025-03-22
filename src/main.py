@@ -6,6 +6,7 @@ import subprocess
 import asyncio
 import signal
 import json
+from datetime import datetime, timedelta, timezone
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, Optional
@@ -88,14 +89,15 @@ class UploadStates(StatesGroup):
     VPN_CONFIG = State()          # Настройка VPN для канала
     CHANNEL_SELECT = State()      # Выбор канала
     MULTI_CHANNEL = State()       # Выбор количества каналов (1-10)
-    MULTI_CHANNEL_COUNT = State()  # Добавлено недостающее состояние
-    MULTI_CHANNEL_SETUP = State()  # Добавлено, если используется
+    METADATA_INPUT = State()       # Ввод метаданных видео
+    VPN_CHOICE = State()           # Выбор необходимости VPN
+    VPN_CONFIG_UPLOAD = State()    # Загрузка VPN-конфига
 
 
 # ================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ==================
 
 # ================== ЗАГРУЗКА ВИДЕО ==================
-async def upload_video(user_id: int, video_path: str, title: str, description: str) -> str:
+async def upload_video(user_id: int, video_path: str, metadata: dict) -> str:
     try:
         # Получение токена
         credentials = await get_valid_credentials(user_id)
@@ -105,17 +107,25 @@ async def upload_video(user_id: int, video_path: str, title: str, description: s
         # Создание клиента YouTube
         youtube = build("youtube", "v3", credentials=credentials)
 
+        if len(metadata['tags']) > 10:
+            raise ValueError("Максимум 10 тегов")
+        if len(metadata['title']) > 100:
+            raise ValueError("Слишком длинное название")
+
         # Загрузка видео
         request = youtube.videos().insert(
             part="snippet,status",
             body={
                 "snippet": {
-                    "title": title,
-                    "description": description,
-                    "categoryId": "22"  # Категория "People & Blogs"
+                    "title": metadata['title'],  # Используем metadata из параметров
+                    "description": metadata['description'],
+                    "tags": metadata['tags'],
+                    "categoryId": "10"
                 },
                 "status": {
-                    "privacyStatus": "private"  # или "public", "unlisted"
+                    "privacyStatus": "private",
+                    "publishAt": metadata['publish_time'] if metadata['is_scheduled'] else None,
+                    "selfDeclaredMadeForKids": False
                 }
             },
             media_body=MediaFileUpload(video_path)
@@ -184,6 +194,7 @@ async def decrypt_user_data(user_id: int, key: str) -> Optional[bytes]:
 
 
 # ================== ОБРАБОТЧИКИ КОМАНД ==================
+
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
     try:
@@ -229,6 +240,41 @@ async def cmd_start(message: types.Message):
         await message.answer("⚠️ Произошла ошибка. Попробуйте позже.")
 
 
+@dp.callback_query(UploadStates.VPN_CHOICE, F.data.in_(["use_vpn", "no_vpn"]))
+async def handle_vpn_choice(callback: CallbackQuery, state: FSMContext):
+    if callback.data == "use_vpn":
+        await callback.message.answer(
+            "📤 Отправьте файл VPN-конфига (.ovpn) и укажите его название в формате:\nНазвание_конфига")
+        await state.set_state(UploadStates.VPN_CONFIG_UPLOAD)
+    else:
+        await state.update_data(vpn_config=None)
+        await handle_channel_select(callback.message, state)
+    await callback.answer()
+
+
+@dp.message(UploadStates.VPN_CONFIG_UPLOAD)
+async def handle_vpn_config_upload(message: Message, state: FSMContext):
+    if not message.document and '\n' not in message.caption:
+        await message.answer("❌ Отправьте файл .ovpn с названием в подписи!")
+        return
+
+    config_name = message.caption.split('\n')[0]
+    file = await bot.get_file(message.document.file_id)
+    path = Path("temp") / f"{message.from_user.id}_vpn.ovpn"
+    await bot.download_file(file.file_path, path)
+
+    with open(path, 'r') as f:
+        config_data = f.read()
+
+    await state.update_data(vpn_config={
+        'name': config_name,
+        'data': config_data
+    })
+    path.unlink()
+
+    await message.answer(f"✅ Конфиг '{config_name}' сохранен!")
+    await handle_channel_select(message, state)
+
 @dp.message(Command("auth"))
 async def cmd_auth(message: types.Message, state: FSMContext):
     await state.clear()
@@ -243,15 +289,35 @@ async def get_vpn_for_channel(user_id: int, channel_id: str) -> str:
     encrypted = await storage.redis.hget(f"user:{user_id}", f"vpn:{channel_id}")
     return fernet.decrypt(encrypted).decode() if encrypted else ""
 
+
 def connect_to_vpn(config: str):
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".ovpn") as f:
-        f.write(config.encode())
-        subprocess.run(
+    try:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".ovpn") as f:
+            f.write(config.encode())
+            f.flush()  # Важно для записи на диск
+
+        # Добавляем таймаут 15 секунд
+        result = subprocess.run(
             ["sudo", "openvpn", "--config", f.name],
             check=True,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=15,
+            text=True
         )
+        logger.info("VPN подключён успешно")
+        return True
+    except subprocess.CalledProcessError as e:
+        error_msg = f"Ошибка подключения: {e.stderr.strip()}"
+        logger.error(error_msg)
+        raise ValueError(error_msg)
+    except subprocess.TimeoutExpired:
+        error_msg = "Таймаут подключения к VPN"
+        logger.error(error_msg)
+        raise ValueError(error_msg)
+    finally:
+        if 'f' in locals():
+            os.unlink(f.name)  # Удаляем временный файл
 
 async def save_channel(user_id: int, channel_name: str, channel_id: str):
     await storage.redis.hset(f"user:{user_id}:channels", channel_id, channel_name)
@@ -263,23 +329,19 @@ async def get_user_channels(user_id: int) -> list:
 
 @dp.message(Command("setup_channels"))
 async def cmd_setup_channels(message: Message, state: FSMContext):
-    # Получаем каналы через API
     channels = await get_youtube_channels(message.from_user.id)
-
     if not channels:
         await message.answer("❌ Нет доступных каналов. Сначала выполните /auth")
         return
 
-    # Сохраняем каналы
+    # Сохраняем каналы и запускаем настройку VPN
     await storage.redis.hset(
         f"user:{message.from_user.id}:channels",
         mapping={channel_id: name for channel_id, name in channels}
     )
 
-    await message.answer(
-        "✅ Ваши каналы автоматически получены!\n"
-        "Теперь загрузите VPN-конфиги для каждого канала через /setup_vpn"
-    )
+    await state.update_data(channels=channels, current_channel=0)
+    await ask_for_vpn_config(message, state)  # Автоматический переход
 
 
 @dp.message(Command("setup_vpn"))
@@ -385,16 +447,18 @@ async def generate_video(user_id: int, state: FSMContext):
         await bot.send_message(
             user_id,
             "✅ Видео готово!\n"
-            "1. Чтобы выбрать канал, используйте /channel_select\n"
-            "2. Для настройки новых каналов: /setup_channels"
+            "📝 Введите метаданные в формате:\n"
+            "Название\nОписание\nТеги (через запятую)\nДата публикации (YYYY-MM-DDTHH:MM:SSZ или 'сейчас')\n\n"
+            "Пример:\nМое видео\nОписание\nтег1,тег2\nсейчас"
         )
-        await state.set_state(UploadStates.CHANNEL_SELECT)
+        await state.set_state(UploadStates.METADATA_INPUT)
+
     except Exception as e:
         await bot.send_message(user_id, f"❌ Ошибка: {str(e)}")
 
 @dp.message(Command("channel_select"))
-async def cmd_channel_select(message: Message):
-    await handle_channel_select(message, None)
+async def cmd_channel_select(message: Message, state: FSMContext):
+    await handle_channel_select(message, state)
 
 @dp.message(UploadStates.PHOTO_UPLOAD, F.photo)
 async def handle_photo(message: Message, state: FSMContext, bot: Bot):
@@ -405,6 +469,51 @@ async def handle_photo(message: Message, state: FSMContext, bot: Bot):
     await message.answer("🎵 Теперь отправьте MP3-аудио:")
     await state.set_state(UploadStates.AUDIO_UPLOAD)
 
+
+@dp.message(UploadStates.METADATA_INPUT)
+async def handle_metadata(message: Message, state: FSMContext):
+    from datetime import datetime
+    from dateutil.parser import parse
+    try:
+        parts = message.text.split('\n')
+        if len(parts) != 4:
+            raise ValueError("Неверный формат данных")
+
+        title = parts[0].strip()
+        description = parts[1].strip()
+        tags = [tag.strip() for tag in parts[2].split(',')]
+        publish_time = parts[3].strip().lower()
+
+        # Парсинг даты
+        if publish_time != 'сейчас':
+            from dateutil.parser import parse
+            parse(publish_time)
+            is_scheduled = True
+        else:
+            publish_time = datetime.utcnow().isoformat() + "Z"
+            is_scheduled = False
+
+        await state.update_data(
+            video_metadata={
+                'title': title,
+                'description': description,
+                'tags': tags,
+                'publish_time': publish_time,
+                'is_scheduled': is_scheduled
+            }
+        )
+
+        # Запрос о необходимости VPN
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="Да", callback_data="use_vpn"),
+             InlineKeyboardButton(text="Нет", callback_data="no_vpn")]
+        ])
+        await message.answer("🔐 Использовать VPN/прокси для загрузки?", reply_markup=keyboard)
+        await state.set_state(UploadStates.VPN_CHOICE)
+
+    except Exception as e:
+        logger.error(f"Ошибка метаданных: {str(e)}")
+        await message.answer("❌ Ошибка формата! Повторите ввод:")
 
 @dp.message(UploadStates.AUDIO_UPLOAD, F.audio)
 async def handle_audio(message: Message, state: FSMContext, bot: Bot):
@@ -439,7 +548,6 @@ async def handle_content_type(callback: CallbackQuery, state: FSMContext):
 @dp.callback_query(UploadStates.CONTENT_TYPE, F.data == "multi_channel")
 async def handle_multi_channel(callback: CallbackQuery, state: FSMContext):
     await callback.message.answer("Сколько каналов вы хотите использовать? (1-10)")
-    await state.set_state(UploadStates.MULTI_CHANNEL_COUNT)
     await callback.answer()
 
 @dp.message(Command("upload"))
@@ -523,50 +631,9 @@ async def handle_vpn_config(message: Message, state: FSMContext):
 @dp.callback_query(UploadStates.MULTI_CHANNEL)
 async def handle_multi_channel(callback: CallbackQuery, state: FSMContext):
     await callback.message.answer("Введите количество каналов (1-10):")
-    await state.set_state(UploadStates.MULTI_CHANNEL_COUNT)
 
-
-# Обработчик настройки каналов
-@dp.message(UploadStates.MULTI_CHANNEL_COUNT)
-async def handle_channel_setup(message: Message, state: FSMContext):
-    try:
-        count = int(message.text)
-        if not 1 <= count <= 10:
-            raise ValueError
-
-        await state.update_data(channel_count=count, current_channel=1)
-        await message.answer(f"Настройка канала 1/{count}\nВведите название канала:")
-        await state.set_state(UploadStates.MULTI_CHANNEL_SETUP)
-
-    except:
-        await message.answer("❌ Введите число от 1 до 10!")
-
-
-# Циклическая настройка каналов
-@dp.message(UploadStates.MULTI_CHANNEL_SETUP)
-async def handle_channel_config(message: Message, state: FSMContext):
+async def upload_to_multiple_channels(user_id: int, video_path: str, state: FSMContext):
     data = await state.get_data()
-    current = data["current_channel"]
-    total = data["channel_count"]
-
-    # Сохраняем название канала
-    await storage.redis.hset(
-        f"user:{message.from_user.id}:channels",
-        f"channel_{current}",
-        message.text
-    )
-
-    if current < total:
-        await state.update_data(current_channel=current + 1)
-        await message.answer(
-            f"Настройка канала {current + 1}/{total}\nВведите название канала:"
-        )
-    else:
-        await message.answer("✅ Все каналы настроены! Теперь загрузите VPN-конфиги.")
-        await state.set_state(UploadStates.VPN_CONFIG)
-
-
-async def upload_to_multiple_channels(user_id: int, video_path: str):
     channels = await storage.redis.hgetall(f"user:{user_id}:channels")
     for channel_num, channel_name in channels.items():
         channel_id = channel_num.decode().split("_")[1]
@@ -576,11 +643,27 @@ async def upload_to_multiple_channels(user_id: int, video_path: str):
         connect_to_vpn(vpn_config)
 
         # Загрузка видео
-        await upload_to_youtube(user_id, video_path, channel_id)
+        await upload_to_youtube(
+            user_id=user_id,
+            video_path=video_path,
+            channel_id=channel_id,
+            metadata=data['video_metadata']  # Передаем метаданные
+        )
 
         await bot.send_message(
             user_id,
             f"✅ Видео загружено на канал: {channel_name.decode()}"
+        )
+    for channel_id, channel_name in channels:
+        # Применение VPN если есть
+        if 'vpn_config' in data:
+            connect_to_vpn(data['vpn_config']['data'])
+
+        await upload_to_youtube(
+            user_id=user_id,
+            video_path=video_path,
+            channel_id=channel_id,
+            metadata=data['video_metadata']
         )
 
 async def get_youtube_channels(user_id: int) -> list:
@@ -614,11 +697,12 @@ async def handle_channel_select(message: Message, state: FSMContext):
             inline_keyboard=[[InlineKeyboardButton(text=name, callback_data=id)]
                              for id, name in channels])
         await message.answer("📡 Выберите канал:", reply_markup=keyboard)
+        await state.set_state(UploadStates.CHANNEL_SELECT)
     except Exception as e:
         await message.answer(f"❌ Ошибка: {str(e)}")
 
 
-async def upload_to_youtube(user_id: int, video_path: str, channel_id: str):
+async def upload_to_youtube(user_id: int, video_path: str, channel_id: str, metadata: dict):
     try:
         credentials = await get_valid_credentials(user_id)
         if not credentials:
@@ -642,22 +726,47 @@ async def upload_to_youtube(user_id: int, video_path: str, channel_id: str):
     except Exception as e:
         logger.error(f"Ошибка загрузки: {str(e)}")
 
+
 @dp.callback_query(UploadStates.CHANNEL_SELECT)
 async def handle_channel_upload(callback: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
     channel_id = callback.data
     data = await state.get_data()
 
-    # Подключение к VPN
-    vpn_config = await get_vpn_for_channel(callback.from_user.id, channel_id)
-    connect_to_vpn(vpn_config)
-
-    # Загрузка видео
-    await upload_to_youtube(
+    await upload_to_multiple_channels(
         user_id=callback.from_user.id,
         video_path=data["video_path"],
-        channel_id=channel_id
+        state=state
     )
-    await callback.message.answer("✅ Видео загружено!")
+
+    try:
+        # Получаем и проверяем VPN-конфиг
+        vpn_config = await get_vpn_for_channel(callback.from_user.id, channel_id)
+        if not vpn_config:
+            await callback.message.answer("❌ Для этого канала не настроен VPN!")
+            return
+
+        if 'vpn_config' in data:
+            connect_to_vpn(data['vpn_config']['data'])
+
+        # Пробуем подключиться
+        connect_to_vpn(vpn_config)
+
+        # Загружаем видео
+        video_id = await upload_to_youtube(
+            user_id=callback.from_user.id,
+            video_path=data["video_path"],
+            channel_id=channel_id
+        )
+
+        await callback.message.answer(f"✅ Видео загружено! ID: {video_id}")
+
+    except ValueError as e:
+        await callback.message.answer(f"❌ VPN Error: {str(e)}")
+    except Exception as e:
+        logger.error(f"Ошибка: {str(e)}", exc_info=True)
+        await callback.message.answer("⚠️ Произошла ошибка при загрузке")
+
     await state.clear()
 
 @dp.message(UploadStates.OAUTH_FLOW)
@@ -714,9 +823,14 @@ async def cmd_guide(message: types.Message):
     instructions = (
         "📚 **Новая инструкция:**\n"
         "1. /auth - Авторизация в YouTube\n"
-        "2. /setup_channels - Получить ваши каналы\n"
-        "3. /setup_vpn - Настроить VPN для каналов\n"
-        "4. /upload - Начать загрузку\n"
+        "2. /setup_channels - Автоматически получить ваши каналы\n"
+        "3. Для каждого канала отправьте .ovpn файл когда бот попросит\n"
+        "4. /upload - Начать загрузку контента\n"
+        "\n"
+        "❗ При проблемах с VPN проверьте:\n"
+        "- Правильность конфига\n"
+        "- Доступность сети\n"
+        "- Права sudo для OpenVPN"
     )
     await message.answer(instructions, parse_mode="Markdown")
 
