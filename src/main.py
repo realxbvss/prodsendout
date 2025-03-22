@@ -88,6 +88,8 @@ class UploadStates(StatesGroup):
     VPN_CONFIG = State()          # Настройка VPN для канала
     CHANNEL_SELECT = State()      # Выбор канала
     MULTI_CHANNEL = State()       # Выбор количества каналов (1-10)
+    MULTI_CHANNEL_COUNT = State()  # Добавлено недостающее состояние
+    MULTI_CHANNEL_SETUP = State()  # Добавлено, если используется
 
 
 # ================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ==================
