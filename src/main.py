@@ -372,21 +372,22 @@ async def get_user_channels(user_id: int) -> list:
 
 @dp.message(Command("setup_channels"))
 async def cmd_setup_channels(message: Message, state: FSMContext):
-    # Добавлен принудительный запрос к API
-    channels = await get_youtube_channels(message.from_user.id)
-    if not channels:
-        await message.answer("❌ Нет доступных каналов. Сначала выполните /auth")
-        return
+    try:
+        channels = await get_youtube_channels(message.from_user.id)
+        if not channels:
+            await message.answer(
+                "❌ Нет доступных каналов. Убедитесь что:\n1. Канал привязан к аккаунту\n2. Вы дали разрешение 'Управление YouTube'")
+            return
 
-    # Очистка предыдущих данных
-    await storage.redis.delete(f"user:{message.from_user.id}:channels")
+        await storage.redis.delete(f"user:{message.from_user.id}:channels")
+        await storage.redis.hset(
+            f"user:{message.from_user.id}:channels",
+            mapping={channel_id: name for channel_id, name in channels}
+        )
+        await message.answer(f"✅ Найдено каналов: {len(channels)}\nИспользуйте /upload")
 
-    # Сохранение новых данных
-    await storage.redis.hset(
-        f"user:{message.from_user.id}:channels",
-        mapping={channel_id: name for channel_id, name in channels}
-    )
-    await message.answer("✅ Каналы сохранены!")
+    except Exception as e:
+        await message.answer(f"❌ Ошибка: {str(e)}")
 
 @dp.message(Command("setup_vpn"))
 async def cmd_setup_vpn(message: Message, state: FSMContext):
@@ -452,7 +453,7 @@ async def handle_oauth_file(message: types.Message, state: FSMContext, bot: Bot)
         # Создание OAuth-потока
         flow = InstalledAppFlow.from_client_secrets_file(
             str(path),
-            scopes=["https://www.googleapis.com/auth/youtube.readonly", "https://www.googleapis.com/auth/youtube.upload"],
+            scopes=["https://www.googleapis.com/auth/youtube"],  # Упростили до одного scope
             redirect_uri="urn:ietf:wg:oauth:2.0:oob"
         )
         auth_url, _ = flow.authorization_url(prompt="consent")  # Определяем auth_url здесь
@@ -723,19 +724,16 @@ async def get_youtube_channels(user_id: int) -> list:
         youtube = build("youtube", "v3", credentials=credentials)
         request = youtube.channels().list(
             part="snippet",
-            mine=True
+            mine=True,
+            managedByMe=True  # Добавили фильтр для каналов пользователя
         )
         response = request.execute()
-
-        # Добавлено логирование
-        logger.info(f"Ответ YouTube API: {json.dumps(response, indent=2)}")
-
         return [
             (item["id"], item["snippet"]["title"])
             for item in response.get("items", [])
         ]
     except Exception as e:
-        logger.error(f"Ошибка получения каналов: {str(e)}", exc_info=True)
+        logger.error(f"Ошибка получения каналов: {str(e)}")
         return []
 
 
@@ -996,67 +994,34 @@ async def get_valid_credentials(user_id: int) -> Optional[Credentials]:
     try:
         encrypted = await decrypt_user_data(user_id, "youtube_token")
         if not encrypted:
-            logger.debug(f"Токен для пользователя {user_id} не найден")
             return None
 
-        # Дешифруем и парсим данные токена
         token_data = json.loads(encrypted.decode())
 
-        # Преобразуем строку expiry в datetime с часовым поясом
-        expiry_str = token_data.get("expiry")
-        if not expiry_str:
-            logger.error("❌ Отсутствует поле 'expiry' в токене.")
-            return None
+        # Преобразование строки expiry в datetime
+        if isinstance(token_data["expiry"], str):
+            token_data["expiry"] = datetime.fromisoformat(token_data["expiry"])
 
-        try:
-            expiry = datetime.fromisoformat(expiry_str).replace(tzinfo=timezone.utc)
-        except ValueError:
-            logger.error(f"❌ Неверный формат даты в токене: {expiry_str}")
-            return None
-
-        # Проверяем, нужно ли обновить токен
-        if datetime.now(timezone.utc) > expiry - timedelta(minutes=5):
-            logger.info("Токен истекает. Обновляем...")
-            credentials = Credentials(
-                token=token_data["token"],
-                refresh_token=token_data["refresh_token"],
-                token_uri=token_data["token_uri"],
-                client_id=token_data["client_id"],
-                client_secret=token_data["client_secret"],
-                scopes=token_data["scopes"]
-            )
-
+        # Проверка срока действия
+        if datetime.now(timezone.utc) > token_data["expiry"] - timedelta(minutes=5):
+            credentials = Credentials(**token_data)
             credentials.refresh(Request())
-            token_data["expiry"] = credentials.expiry.isoformat()
-
-            try:
-                credentials.refresh(Request())
-            except Exception as refresh_error:
-                logger.error(f"Ошибка обновления токена: {str(refresh_error)}")
-                return None
 
             # Обновляем данные токена
             token_data.update({
                 "token": credentials.token,
-                "expiry": credentials.expiry.isoformat()  # Сохраняем в ISO формате
+                "expiry": credentials.expiry.isoformat()  # Сохраняем как строку
             })
 
-            # Шифруем и сохраняем обновленный токен
+            # Шифруем и сохраняем
             encrypted = fernet.encrypt(json.dumps(token_data).encode())
             await update_user_data(user_id, {"youtube_token": encrypted.decode()})
 
-        # Возвращаем объект Credentials
         return Credentials(**token_data)
 
-    except json.JSONDecodeError as e:
-        logger.error(f"Ошибка декодирования токена: {str(e)}")
-    except KeyError as e:
-        logger.error(f"Отсутствует обязательное поле в токене: {str(e)}")
     except Exception as e:
-        logger.error(f"Неизвестная ошибка: {str(e)}", exc_info=True)
-
-    return None
-
+        logger.error(f"Ошибка в get_valid_credentials: {str(e)}", exc_info=True)
+        return None
 
 @dp.message(Command("cancel"))
 async def cmd_cancel(message: Message, state: FSMContext):
