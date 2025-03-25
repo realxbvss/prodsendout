@@ -999,8 +999,12 @@ async def get_valid_credentials(user_id: int) -> Optional[Credentials]:
         token_data = json.loads(encrypted.decode())
 
         # Преобразование строки expiry в datetime
-        if isinstance(token_data["expiry"], str):
-            token_data["expiry"] = datetime.fromisoformat(token_data["expiry"].replace("Z", "+00:00"))
+        if isinstance(token_data.get("expiry"), str):
+            try:
+                token_data["expiry"] = datetime.fromisoformat(token_data["expiry"].replace("Z", "+00:00"))
+            except ValueError:
+                logger.error("❌ Неверный формат даты в токене!")
+                return None
 
         # Проверка срока действия
         if datetime.now(timezone.utc) > token_data["expiry"] - timedelta(minutes=5):
