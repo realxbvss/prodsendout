@@ -230,18 +230,19 @@ async def cmd_start(message: types.Message):
             else:
                 token_status = "\n\n⚠️ Токен истек! Используйте /auth"
 
-        response = (
-            "🎥 <b>YouTube Upload Bot</b>\n\n"
-            "📚 Основные команды:\n"
-            "⚙️ /guide - Показать инструкцию\n"
-            "▶️ /upload - Начать загрузку видео\n"
-            "🔑 /auth - Авторизация в YouTube\n"
-            "⚙️ /view_configs - Показать сохраненные настройки\n"
-            "🗑️ /delete_config &lt;ключ&gt; - Удалить конфигурацию\n\n"
-            "❗️ <b>Перед использованием /upload необходимо выполнить /auth</b>"
-            f"{token_status}"
+        commands = (
+            "🎥 *Доступные команды:*\n"
+            "• `/start` — Начальное меню\n"
+            "• `/auth` — Авторизация в YouTube\n"
+            "• `/upload` — Загрузить видео\n"
+            "• `/view_configs` — Показать конфиги\n"
+            "• `/delete_config` — Удалить конфиг\n"
+            "• `/guide` — Инструкция\n"
+            "• `/setup_channels` — Настроить каналы\n"
+            "• `/cancel` — Отменить текущую операцию\n"
         )
-        await message.answer(response, parse_mode="HTML")
+        await message.answer(commands, parse_mode="MarkdownV2")
+
 
     except Exception as e:
         logger.error(f"Ошибка /start: {str(e)}")
@@ -590,23 +591,17 @@ async def handle_multi_channel(callback: CallbackQuery, state: FSMContext):
 
 @dp.message(Command("upload"))
 async def cmd_upload(message: types.Message, state: FSMContext):
-
-    credentials = await get_valid_credentials(message.from_user.id)
-    if not credentials:
-        await message.answer("❌ Токен не найден! Выполните /auth.")
-        return
-
-
-
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [
-            InlineKeyboardButton(text="Готовое видео", callback_data="ready_video"),
-            InlineKeyboardButton(text="Фото + MP3", callback_data="photo_audio")
-        ],
-        [
-            InlineKeyboardButton(text="Мультиканальная загрузка", callback_data="multi_channel")
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="Готовое видео", callback_data="ready_video"),
+                InlineKeyboardButton(text="Фото + MP3", callback_data="photo_audio")
+            ],
+            [
+                InlineKeyboardButton(text="Мультиканальная загрузка", callback_data="multi_channel")
+            ]
         ]
-    ])
+    )
     await message.answer("📤 Выберите тип контента:", reply_markup=keyboard)
     await state.set_state(UploadStates.CONTENT_TYPE)
 @dp.message(UploadStates.MEDIA_UPLOAD, F.video)
@@ -922,18 +917,15 @@ dp.message.register(reset_state_handler, Command(commands=["start", "auth", "upl
 @dp.message(Command("guide"))
 async def cmd_guide(message: types.Message):
     instructions = (
-        "📚 **Новая инструкция:**\n"
-        "1. /auth - Авторизация в YouTube\n"
-        "2. /setup_channels - Автоматически получить ваши каналы\n"
-        "3. Для каждого канала отправьте .ovpn файл когда бот попросит\n"
-        "4. /upload - Начать загрузку контента\n"
-        "\n"
-        "❗ При проблемах с VPN проверьте:\n"
-        "- Правильность конфига\n"
-        "- Доступность сети\n"
-        "- Права sudo для OpenVPN"
+        "📚 *Инструкция:*\n"
+        "1. `/auth` — Авторизация в YouTube\n"
+        "2. `/setup_channels` — Получить список каналов\n"
+        "3. `/upload` — Загрузить видео\n"
+        "4. `/view_configs` — Показать настройки\n"
+        "5. `/delete_config` — Удалить конфиг\n\n"
+        "⚠️ *Перед загрузкой выполните* `/auth`"
     )
-    await message.answer(instructions, parse_mode="Markdown")
+    await message.answer(instructions, parse_mode="MarkdownV2")
 
 @dp.message(Command("view_configs"))
 async def cmd_view_configs(message: types.Message):
@@ -1006,13 +998,13 @@ async def get_valid_credentials(user_id: int) -> Optional[Credentials]:
         # Преобразуем строку expiry в datetime с часовым поясом
         expiry_str = token_data.get("expiry")
         if not expiry_str:
-            logger.error("Отсутствует поле 'expiry' в токене")
+            logger.error("❌ Отсутствует поле 'expiry' в токене.")
             return None
 
         try:
             expiry = datetime.fromisoformat(expiry_str).replace(tzinfo=timezone.utc)
-        except ValueError as e:
-            logger.error(f"Неверный формат даты в токене: {expiry_str}")
+        except ValueError:
+            logger.error(f"❌ Неверный формат даты в токене: {expiry_str}")
             return None
 
         # Проверяем, нужно ли обновить токен
@@ -1026,6 +1018,9 @@ async def get_valid_credentials(user_id: int) -> Optional[Credentials]:
                 client_secret=token_data["client_secret"],
                 scopes=token_data["scopes"]
             )
+
+            credentials.refresh(Request())
+            token_data["expiry"] = credentials.expiry.isoformat()
 
             try:
                 credentials.refresh(Request())
