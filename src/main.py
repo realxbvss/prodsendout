@@ -453,14 +453,14 @@ async def handle_oauth_file(message: types.Message, state: FSMContext, bot: Bot)
         # Создание OAuth-потока
         flow = InstalledAppFlow.from_client_secrets_file(
             str(path),
-            scopes=["https://www.googleapis.com/auth/youtube"],  # Упростили до одного scope
+            scopes = ["https://www.googleapis.com/auth/youtube"],  # Упростили до одного scope
             redirect_uri="urn:ietf:wg:oauth:2.0:oob"
         )
         auth_url, _ = flow.authorization_url(prompt="consent")  # Определяем auth_url здесь
 
         await state.update_data(
             client_config=data["installed"],  # Важно!
-            scopes=["https://www.googleapis.com/auth/youtube.readonly", "https://www.googleapis.com/auth/youtube.upload"],
+            scopes = ["https://www.googleapis.com/auth/youtube"],
             redirect_uri="urn:ietf:wg:oauth:2.0:oob"
         )
 
@@ -1000,7 +1000,7 @@ async def get_valid_credentials(user_id: int) -> Optional[Credentials]:
 
         # Преобразование строки expiry в datetime
         if isinstance(token_data["expiry"], str):
-            token_data["expiry"] = datetime.fromisoformat(token_data["expiry"])
+            token_data["expiry"] = datetime.fromisoformat(token_data["expiry"].replace("Z", "+00:00"))
 
         # Проверка срока действия
         if datetime.now(timezone.utc) > token_data["expiry"] - timedelta(minutes=5):
