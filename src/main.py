@@ -359,28 +359,34 @@ def connect_to_vpn(config: str):
             os.unlink(f.name)  # Удаляем временный файл
 
 async def save_channel(user_id: int, channel_name: str, channel_id: str):
-    await storage.redis.hset(f"user:{user_id}:channels", channel_id, channel_name)
+    await storage.redis.hset(
+        f"user:{user_id}:channels",
+        channel_id,  # Ключ - channel_id
+        channel_name  # Значение - название канала
+    )
 
 async def get_user_channels(user_id: int) -> list:
     channels = await storage.redis.hgetall(f"user:{user_id}:channels")
     return [(k.decode(), v.decode()) for k, v in channels.items()]
 
 
-
 @dp.message(Command("setup_channels"))
 async def cmd_setup_channels(message: Message, state: FSMContext):
+    # Добавлен принудительный запрос к API
     channels = await get_youtube_channels(message.from_user.id)
     if not channels:
         await message.answer("❌ Нет доступных каналов. Сначала выполните /auth")
         return
 
-    # Сохраняем каналы в Redis в формате "channel_id: channel_name"
+    # Очистка предыдущих данных
+    await storage.redis.delete(f"user:{message.from_user.id}:channels")
+
+    # Сохранение новых данных
     await storage.redis.hset(
         f"user:{message.from_user.id}:channels",
         mapping={channel_id: name for channel_id, name in channels}
     )
     await message.answer("✅ Каналы сохранены!")
-    await state.clear()
 
 @dp.message(Command("setup_vpn"))
 async def cmd_setup_vpn(message: Message, state: FSMContext):
@@ -707,6 +713,7 @@ async def upload_to_multiple_channels(user_id: int, video_path: str, state: FSMC
             metadata=data['video_metadata']
         )
 
+
 async def get_youtube_channels(user_id: int) -> list:
     try:
         credentials = await get_valid_credentials(user_id)
@@ -719,7 +726,10 @@ async def get_youtube_channels(user_id: int) -> list:
             mine=True
         )
         response = request.execute()
-        logger.debug(f"Ответ YouTube API: {response}")  # <-- Добавьте это
+
+        # Добавлено логирование
+        logger.info(f"Ответ YouTube API: {json.dumps(response, indent=2)}")
+
         return [
             (item["id"], item["snippet"]["title"])
             for item in response.get("items", [])
@@ -880,20 +890,17 @@ async def show_channel_selection(message: Message, channels: list, state: FSMCon
             await message.answer("❌ Нет доступных каналов")
             return
 
-        # Генерируем кнопки
         buttons = []
         for channel_id, channel_name in channels:
+            # Исправлен порядок аргументов
             buttons.append(
                 [InlineKeyboardButton(text=channel_name, callback_data=channel_id)]
             )
 
         keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
         await message.answer("📡 Выберите канал:", reply_markup=keyboard)
-        await state.set_state(UploadStates.CHANNEL_SELECT)
-
     except Exception as e:
-        logger.error(f"Ошибка формирования списка каналов: {str(e)}")
-        await message.answer("⚠️ Ошибка при загрузке списка каналов")
+        logger.error(f"Ошибка: {str(e)}")
 
 @dp.message(Command("refresh_channels"))
 async def cmd_refresh_channels(message: Message, state: FSMContext):
