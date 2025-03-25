@@ -201,6 +201,10 @@ async def decrypt_user_data(user_id: int, key: str) -> Optional[bytes]:
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
     try:
+
+        if not await storage.redis.ping():
+            raise ConnectionError("Redis недоступен")
+
         key = StorageKey(
             chat_id=message.chat.id,  # ID чата
             user_id=message.from_user.id,  # ID пользователя
@@ -239,9 +243,8 @@ async def cmd_start(message: types.Message):
         await message.answer(response, parse_mode="HTML")
 
     except Exception as e:
-        logger.error(f"Ошибка /start: {str(e)}", exc_info=True)
-        await message.answer("⚠️ Произошла ошибка. Попробуйте позже.")
-
+        logger.error(f"Ошибка /start: {str(e)}")
+        await message.answer("⚠️ Ошибка подключения к Redis. Проверьте сервер.")
 
 @dp.callback_query(UploadStates.VPN_CHOICE, F.data.in_(["use_vpn", "no_vpn"]))
 async def handle_vpn_choice(callback: CallbackQuery, state: FSMContext):
@@ -416,14 +419,14 @@ async def handle_oauth_file(message: types.Message, state: FSMContext, bot: Bot)
         # Создание OAuth-потока
         flow = InstalledAppFlow.from_client_secrets_file(
             str(path),
-            scopes=["https://www.googleapis.com/auth/youtube.upload"],
+            scopes=["https://www.googleapis.com/auth/youtube.readonly", "https://www.googleapis.com/auth/youtube.upload"],
             redirect_uri="urn:ietf:wg:oauth:2.0:oob"
         )
         auth_url, _ = flow.authorization_url(prompt="consent")  # Определяем auth_url здесь
 
         await state.update_data(
             client_config=data["installed"],  # Важно!
-            scopes=["https://www.googleapis.com/auth/youtube.upload"],
+            scopes=["https://www.googleapis.com/auth/youtube.readonly", "https://www.googleapis.com/auth/youtube.upload"],
             redirect_uri="urn:ietf:wg:oauth:2.0:oob"
         )
 
@@ -687,13 +690,13 @@ async def get_youtube_channels(user_id: int) -> list:
             mine=True
         )
         response = request.execute()
+        logger.debug(f"Ответ YouTube API: {response}")  # <-- Добавьте это
         return [
             (item["id"], item["snippet"]["title"])
             for item in response.get("items", [])
-            if item["id"] and item["snippet"]["title"]
         ]
     except Exception as e:
-        logger.error(f"Ошибка получения каналов: {str(e)}")
+        logger.error(f"Ошибка получения каналов: {str(e)}", exc_info=True)
         return []
 
 
@@ -738,12 +741,16 @@ async def upload_to_youtube(user_id: int, video_path: str, channel_id: str, meta
     except Exception as e:
         logger.error(f"Ошибка загрузки: {str(e)}")
 
+@dp.message(Command("cancel"))
+async def cmd_cancel(message: Message, state: FSMContext):
+    await state.clear()
+    await message.answer("♻️ Все операции отменены.")
 
 @dp.callback_query(UploadStates.CHANNEL_SELECT)
 async def handle_channel_selection(callback: CallbackQuery, state: FSMContext):
     try:
         channel_id = callback.data
-        channels = await get_youtube_channels(callback.from_user.id)
+        channels = await get_user_channels(callback.from_user.id)
         channel_name = next((name for id, name in channels if id == channel_id), "Неизвестный канал")
 
         await state.update_data(
