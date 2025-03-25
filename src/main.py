@@ -261,26 +261,52 @@ async def handle_vpn_choice(callback: CallbackQuery, state: FSMContext):
 
 @dp.message(UploadStates.VPN_CONFIG_UPLOAD)
 async def handle_vpn_config_upload(message: Message, state: FSMContext):
-    if not message.document and '\n' not in message.caption:
-        await message.answer("❌ Отправьте файл .ovpn с названием в подписи!")
-        return
+    try:
+        # Проверяем наличие документа и подписи
+        if not message.document:
+            await message.answer("❌ Вы не отправили файл!")
+            return
 
-    config_name = message.caption.split('\n')[0]
-    file = await bot.get_file(message.document.file_id)
-    path = Path("temp") / f"{message.from_user.id}_vpn.ovpn"
-    await bot.download_file(file.file_path, path)
+        if not message.caption:
+            await message.answer("❌ Укажите название конфига в подписи к файлу!")
+            return
 
-    with open(path, 'r') as f:
-        config_data = f.read()
+        # Извлекаем название из первой строки подписи
+        config_name = message.caption.strip().split('\n')[0].strip()
+        if not config_name:
+            await message.answer("❌ Название конфига не может быть пустым!")
+            return
 
-    await state.update_data(vpn_config={
-        'name': config_name,
-        'data': config_data
-    })
-    path.unlink()
+        # Скачиваем файл
+        file = await bot.get_file(message.document.file_id)
+        path = Path("temp") / f"{message.from_user.id}_vpn.ovpn"
+        await bot.download_file(file.file_path, path)
 
-    await message.answer(f"✅ Конфиг '{config_name}' сохранен!")
-    await handle_channel_select(message, state)
+        # Читаем содержимое
+        with open(path, 'r') as f:
+            config_data = f.read()
+
+        # Проверяем валидность конфига
+        if "client" not in config_data:
+            await message.answer("❌ Это не валидный конфиг OpenVPN!")
+            path.unlink(missing_ok=True)
+            return
+
+        # Сохраняем данные
+        await state.update_data(vpn_config={
+            'name': config_name,
+            'data': config_data
+        })
+
+        # Удаляем временный файл
+        path.unlink(missing_ok=True)
+
+        await message.answer(f"✅ Конфиг '{config_name}' успешно сохранен!")
+        await handle_channel_select(message, state)
+
+    except Exception as e:
+        logger.error(f"Ошибка загрузки VPN: {str(e)}", exc_info=True)
+        await message.answer("❌ Произошла ошибка при обработке конфига!")
 
 @dp.message(Command("auth"))
 async def cmd_auth(message: types.Message, state: FSMContext):
@@ -339,6 +365,7 @@ async def get_user_channels(user_id: int) -> list:
     return [(k.decode(), v.decode()) for k, v in channels.items()]
 
 
+
 @dp.message(Command("setup_channels"))
 async def cmd_setup_channels(message: Message, state: FSMContext):
     channels = await get_youtube_channels(message.from_user.id)
@@ -346,15 +373,13 @@ async def cmd_setup_channels(message: Message, state: FSMContext):
         await message.answer("❌ Нет доступных каналов. Сначала выполните /auth")
         return
 
-    # Сохраняем каналы и запускаем настройку VPN
+    # Сохраняем каналы в Redis в формате "channel_id: channel_name"
     await storage.redis.hset(
         f"user:{message.from_user.id}:channels",
         mapping={channel_id: name for channel_id, name in channels}
     )
-
-    await state.update_data(channels=channels, current_channel=0)
-    await ask_for_vpn_config(message, state)  # Автоматический переход
-
+    await message.answer("✅ Каналы сохранены!")
+    await state.clear()
 
 @dp.message(Command("setup_vpn"))
 async def cmd_setup_vpn(message: Message, state: FSMContext):
@@ -759,20 +784,19 @@ async def cmd_cancel(message: Message, state: FSMContext):
 async def handle_channel_selection(callback: CallbackQuery, state: FSMContext):
     try:
         channel_id = callback.data
+        # Получаем каналы из Redis, а не из Google API
         channels = await get_user_channels(callback.from_user.id)
         channel_name = next((name for id, name in channels if id == channel_id), "Неизвестный канал")
 
-        await state.update_data(
-            selected_channel=channel_id,
-            channel_name=channel_name
-        )
+        if channel_name == "Неизвестный канал":
+            await callback.message.answer("❌ Канал не найден!")
+            return
 
+        await state.update_data(selected_channel=channel_id)
         await callback.message.edit_text(f"✅ Выбран канал: {channel_name}")
         await show_content_type_menu(callback.message, state)
-
     except Exception as e:
         logger.error(f"Ошибка выбора канала: {str(e)}")
-        await callback.message.answer("⚠️ Ошибка выбора канала")
 
 
 async def show_content_type_menu(message: Message, state: FSMContext):
@@ -973,33 +997,64 @@ async def get_valid_credentials(user_id: int) -> Optional[Credentials]:
     try:
         encrypted = await decrypt_user_data(user_id, "youtube_token")
         if not encrypted:
+            logger.debug(f"Токен для пользователя {user_id} не найден")
             return None
 
+        # Дешифруем и парсим данные токена
         token_data = json.loads(encrypted.decode())
-        expiry = datetime.fromisoformat(token_data['expiry']).replace(tzinfo=timezone.utc)
 
+        # Преобразуем строку expiry в datetime с часовым поясом
+        expiry_str = token_data.get("expiry")
+        if not expiry_str:
+            logger.error("Отсутствует поле 'expiry' в токене")
+            return None
+
+        try:
+            expiry = datetime.fromisoformat(expiry_str).replace(tzinfo=timezone.utc)
+        except ValueError as e:
+            logger.error(f"Неверный формат даты в токене: {expiry_str}")
+            return None
+
+        # Проверяем, нужно ли обновить токен
         if datetime.now(timezone.utc) > expiry - timedelta(minutes=5):
+            logger.info("Токен истекает. Обновляем...")
             credentials = Credentials(
-                token=token_data['token'],
-                refresh_token=token_data['refresh_token'],
-                token_uri=token_data['token_uri'],
-                client_id=token_data['client_id'],
-                client_secret=token_data['client_secret'],
-                scopes=token_data['scopes']
+                token=token_data["token"],
+                refresh_token=token_data["refresh_token"],
+                token_uri=token_data["token_uri"],
+                client_id=token_data["client_id"],
+                client_secret=token_data["client_secret"],
+                scopes=token_data["scopes"]
             )
-            credentials.refresh(Request())  # Явное обновление токена
-            # Обновляем данные в Redis
-            token_data.update({
-                'token': credentials.token,
-                'expiry': credentials.expiry.isoformat()
-            })
-            encrypted = fernet.encrypt(json.dumps(token_data).encode())
-            await update_user_data(user_id, {'youtube_token': encrypted.decode()})
 
+            try:
+                credentials.refresh(Request())
+            except Exception as refresh_error:
+                logger.error(f"Ошибка обновления токена: {str(refresh_error)}")
+                return None
+
+            # Обновляем данные токена
+            token_data.update({
+                "token": credentials.token,
+                "expiry": credentials.expiry.isoformat()  # Сохраняем в ISO формате
+            })
+
+            # Шифруем и сохраняем обновленный токен
+            encrypted = fernet.encrypt(json.dumps(token_data).encode())
+            await update_user_data(user_id, {"youtube_token": encrypted.decode()})
+
+        # Возвращаем объект Credentials
         return Credentials(**token_data)
+
+    except json.JSONDecodeError as e:
+        logger.error(f"Ошибка декодирования токена: {str(e)}")
+    except KeyError as e:
+        logger.error(f"Отсутствует обязательное поле в токене: {str(e)}")
     except Exception as e:
-        logger.error(f"Ошибка учетных данных: {str(e)}", exc_info=True)
-        return None
+        logger.error(f"Неизвестная ошибка: {str(e)}", exc_info=True)
+
+    return None
+
 
 @dp.message(Command("cancel"))
 async def cmd_cancel(message: Message, state: FSMContext):
