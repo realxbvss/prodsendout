@@ -565,6 +565,14 @@ async def handle_multi_channel(callback: CallbackQuery, state: FSMContext):
 
 @dp.message(Command("upload"))
 async def cmd_upload(message: types.Message, state: FSMContext):
+
+    credentials = await get_valid_credentials(message.from_user.id)
+    if not credentials:
+        await message.answer("❌ Токен не найден! Выполните /auth.")
+        return
+
+
+
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [
             InlineKeyboardButton(text="Готовое видео", callback_data="ready_video"),
@@ -929,25 +937,36 @@ async def cmd_view_configs(message: types.Message):
 @dp.message(Command("delete_config"))
 async def cmd_delete_config(message: types.Message):
     try:
-        args = message.text.split()
-        if len(args) < 2:
-            await message.answer("❌ Укажите ключ конфигурации!")
-            return
-
-        config_key = args[1].strip()
+        # Получаем список конфигураций
         user_data = await get_user_data(message.from_user.id)
+        configs = [key for key in user_data if key.startswith(("vpn:", "youtube_token"))]
 
-        if config_key not in user_data:
-            await message.answer(f"❌ Конфигурация '{config_key}' не найдена!")
+        if not configs:
+            await message.answer("❌ Нет сохраненных конфигураций!")
             return
 
-        await storage.redis.hdel(f"user:{message.from_user.id}", config_key)
-        await message.answer(f"✅ Конфигурация '{config_key}' удалена!")
+        # Создаем инлайн-клавиатуру с конфигурациями
+        keyboard = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text=key, callback_data=f"delete_{key}")]  # Закрывающая скобка для кнопки
+                for key in configs  # Добавлен пробел для читаемости
+            ]
+        )
+        await message.answer("🗑️ Выберите конфигурацию для удаления:", reply_markup=keyboard)
 
     except Exception as e:
         logger.error(f"Ошибка /delete_config: {str(e)}")
-        await message.answer("⚠️ Ошибка при удалении.")
+        await message.answer("⚠️ Ошибка при получении данных.")
 
+@dp.callback_query(F.data.startswith("delete_"))
+async def handle_delete_config(callback: CallbackQuery):
+    config_key = callback.data.split("_", 1)[1]
+    try:
+        await storage.redis.hdel(f"user:{callback.from_user.id}", config_key)
+        await callback.message.answer(f"✅ Конфигурация '{config_key}' удалена!")
+    except Exception as e:
+        await callback.message.answer(f"❌ Ошибка: {str(e)}")
+    await callback.answer()
 
 # ================== ЗАГРУЗКА ВИДЕО ==================
 async def get_valid_credentials(user_id: int) -> Optional[Credentials]:
@@ -968,8 +987,8 @@ async def get_valid_credentials(user_id: int) -> Optional[Credentials]:
                 client_secret=token_data['client_secret'],
                 scopes=token_data['scopes']
             )
-            credentials.refresh(Request())
-            token_data['expiry'] = credentials.expiry.isoformat()
+            credentials.refresh(Request())  # Явное обновление токена
+            # Обновляем данные в Redis
             token_data.update({
                 'token': credentials.token,
                 'expiry': credentials.expiry.isoformat()
@@ -979,9 +998,13 @@ async def get_valid_credentials(user_id: int) -> Optional[Credentials]:
 
         return Credentials(**token_data)
     except Exception as e:
-        logger.error(f"Ошибка учетных данных: {str(e)}")
+        logger.error(f"Ошибка учетных данных: {str(e)}", exc_info=True)
         return None
 
+@dp.message(Command("cancel"))
+async def cmd_cancel(message: Message, state: FSMContext):
+    await state.clear()
+    await message.answer("♻️ Все операции отменены.")
 
 async def shutdown(signal, loop):
     logger.info("Завершение работы...")
