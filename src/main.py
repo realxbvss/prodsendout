@@ -6,6 +6,7 @@ import subprocess
 import asyncio
 import signal
 import json
+from datetime import datetime, timezone, UTC
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from datetime import datetime, timedelta, timezone
@@ -217,7 +218,7 @@ async def cmd_start(message: types.Message):
 
         if credentials:
             from datetime import datetime, timezone
-            expiry_time = credentials.expiry.replace(tzinfo=timezone.utc)
+            expiry_time = datetime.fromisoformat(credentials.expiry).replace(tzinfo=timezone.utc)
             time_left = expiry_time - datetime.now(timezone.utc)
 
             if time_left.total_seconds() > 0:
@@ -759,7 +760,7 @@ async def handle_channel_selection(callback: CallbackQuery, state: FSMContext):
         )
 
         await callback.message.edit_text(f"✅ Выбран канал: {channel_name}")
-        await show_content_type_menu(callback.message)
+        await show_content_type_menu(callback.message, state)
 
     except Exception as e:
         logger.error(f"Ошибка выбора канала: {str(e)}")
@@ -956,9 +957,9 @@ async def get_valid_credentials(user_id: int) -> Optional[Credentials]:
             return None
 
         token_data = json.loads(encrypted.decode())
-        expiry = datetime.fromisoformat(token_data['expiry'])
+        expiry = datetime.fromisoformat(token_data['expiry']).replace(tzinfo=timezone.utc)
 
-        if datetime.utcnow() > expiry - timedelta(minutes=5):
+        if datetime.now(timezone.utc) > expiry - timedelta(minutes=5):
             credentials = Credentials(
                 token=token_data['token'],
                 refresh_token=token_data['refresh_token'],
@@ -968,7 +969,7 @@ async def get_valid_credentials(user_id: int) -> Optional[Credentials]:
                 scopes=token_data['scopes']
             )
             credentials.refresh(Request())
-
+            token_data['expiry'] = credentials.expiry.isoformat()
             token_data.update({
                 'token': credentials.token,
                 'expiry': credentials.expiry.isoformat()
