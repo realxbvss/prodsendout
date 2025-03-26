@@ -991,10 +991,13 @@ async def handle_delete_config(callback: CallbackQuery):
     await callback.answer()
 
 # ================== ЗАГРУЗКА ВИДЕО ==================
+# В функции get_valid_credentials внесите следующие изменения:
+
 async def get_valid_credentials(user_id: int) -> Optional[Credentials]:
     try:
         encrypted = await decrypt_user_data(user_id, "youtube_token")
         if not encrypted:
+            logger.debug("Токен не найден в Redis.")
             return None
 
         token_data = json.loads(encrypted.decode())
@@ -1007,30 +1010,40 @@ async def get_valid_credentials(user_id: int) -> Optional[Credentials]:
             if not expiry_str.endswith("Z") and "+" not in expiry_str:
                 expiry_str += "+00:00"
 
-            # Создаем aware datetime в UTC
-            token_data["expiry"] = datetime.fromisoformat(expiry_str).astimezone(timezone.utc)
+            try:
+                # Создаем aware datetime в UTC
+                token_data["expiry"] = datetime.fromisoformat(expiry_str).astimezone(timezone.utc)
+            except ValueError as e:
+                logger.error(f"Ошибка формата даты: {e}")
+                return None
 
         # Получаем текущее время как aware datetime
         now = datetime.now(timezone.utc)
 
         # Проверка срока действия токена
         if now > token_data["expiry"] - timedelta(minutes=5):
-            # Обновляем токен и сохраняем expiry как aware datetime
+            logger.info("Токен истекает. Обновление...")
             credentials = Credentials(**token_data)
-            credentials.refresh(Request())
+            try:
+                credentials.refresh(Request())
+            except Exception as e:
+                logger.error(f"Ошибка обновления токена: {e}")
+                return None
 
+            # Обновляем данные токена с учётом часового пояса
             token_data.update({
                 "token": credentials.token,
                 "expiry": credentials.expiry.astimezone(timezone.utc).isoformat()
             })
 
+            # Сохраняем обновлённый токен
             encrypted = fernet.encrypt(json.dumps(token_data).encode())
             await update_user_data(user_id, {"youtube_token": encrypted.decode()})
 
         return Credentials(**token_data)
 
     except Exception as e:
-        logger.error(f"Ошибка: {str(e)}", exc_info=True)
+        logger.error(f"Критическая ошибка: {str(e)}", exc_info=True)
         return None
 
 @dp.message(Command("cancel"))
