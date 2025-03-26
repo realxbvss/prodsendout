@@ -998,26 +998,27 @@ async def get_valid_credentials(user_id: int) -> Optional[Credentials]:
 
         token_data = json.loads(encrypted.decode())
 
-        # Преобразование строки expiry в datetime
-        if isinstance(token_data.get("expiry"), str):
-            try:
-                token_data["expiry"] = datetime.fromisoformat(token_data["expiry"].replace("Z", "+00:00"))
-            except ValueError:
-                logger.error("❌ Неверный формат даты в токене!")
-                return None
+        # Преобразование строки expiry в aware datetime
+        if isinstance(token_data["expiry"], str):
+            expiry_str = token_data["expiry"]
+            if not expiry_str.endswith('Z'):
+                expiry_str += '+00:00'  # Добавляем временную зону, если отсутствует
+            token_data["expiry"] = datetime.fromisoformat(expiry_str).astimezone(timezone.utc)
 
-        # Проверка срока действия
-        if datetime.now(timezone.utc) > token_data["expiry"] - timedelta(minutes=5):
+        # Получаем текущее время как aware datetime
+        now = datetime.now(timezone.utc)
+
+        # Проверяем срок действия токена
+        if now > token_data["expiry"] - timedelta(minutes=5):
             credentials = Credentials(**token_data)
             credentials.refresh(Request())
 
-            # Обновляем данные токена
+            # Обновляем expiry с временной зоной
             token_data.update({
                 "token": credentials.token,
-                "expiry": credentials.expiry.isoformat()  # Сохраняем как строку
+                "expiry": credentials.expiry.astimezone(timezone.utc).isoformat()  # Сохраняем как aware datetime
             })
 
-            # Шифруем и сохраняем
             encrypted = fernet.encrypt(json.dumps(token_data).encode())
             await update_user_data(user_id, {"youtube_token": encrypted.decode()})
 
