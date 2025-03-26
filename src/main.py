@@ -7,6 +7,7 @@ import asyncio
 import signal
 import json
 from datetime import datetime, timezone, UTC
+from datetime import datetime, timezone, timedelta
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from datetime import datetime, timedelta, timezone
@@ -999,24 +1000,28 @@ async def get_valid_credentials(user_id: int) -> Optional[Credentials]:
         token_data = json.loads(encrypted.decode())
 
         # Преобразование строки expiry в aware datetime
-        if isinstance(token_data["expiry"], str):
+        if isinstance(token_data.get("expiry"), str):
             expiry_str = token_data["expiry"]
-            if not expiry_str.endswith('Z'):
-                expiry_str += '+00:00'  # Добавляем временную зону, если отсутствует
+
+            # Добавляем часовой пояс, если его нет
+            if not expiry_str.endswith("Z") and "+" not in expiry_str:
+                expiry_str += "+00:00"
+
+            # Создаем aware datetime в UTC
             token_data["expiry"] = datetime.fromisoformat(expiry_str).astimezone(timezone.utc)
 
         # Получаем текущее время как aware datetime
         now = datetime.now(timezone.utc)
 
-        # Проверяем срок действия токена
+        # Проверка срока действия токена
         if now > token_data["expiry"] - timedelta(minutes=5):
+            # Обновляем токен и сохраняем expiry как aware datetime
             credentials = Credentials(**token_data)
             credentials.refresh(Request())
 
-            # Обновляем expiry с временной зоной
             token_data.update({
                 "token": credentials.token,
-                "expiry": credentials.expiry.astimezone(timezone.utc).isoformat()  # Сохраняем как aware datetime
+                "expiry": credentials.expiry.astimezone(timezone.utc).isoformat()
             })
 
             encrypted = fernet.encrypt(json.dumps(token_data).encode())
@@ -1025,7 +1030,7 @@ async def get_valid_credentials(user_id: int) -> Optional[Credentials]:
         return Credentials(**token_data)
 
     except Exception as e:
-        logger.error(f"Ошибка в get_valid_credentials: {str(e)}", exc_info=True)
+        logger.error(f"Ошибка: {str(e)}", exc_info=True)
         return None
 
 @dp.message(Command("cancel"))
