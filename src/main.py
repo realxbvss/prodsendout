@@ -50,17 +50,18 @@ youtube_service.setup_routes()
 async def graceful_shutdown():
     logger.info("Завершение работы...")
     await storage.close()
+
     try:
+        # Закрываем сессию бота без ожидания
         await bot.session.close()
     except Exception as e:
         logger.error(f"Ошибка закрытия сессии: {e}")
 
     try:
+        # Принудительное закрытие без обработки Flood Control
         await bot.close()
     except TelegramRetryAfter as e:
-        logger.warning(f"Ожидание {e.retry_after} сек...")
-        await asyncio.sleep(e.retry_after)
-        await bot.close()
+        logger.warning(f"Режим разработки: пропуск ожидания {e.retry_after} сек.")
     except Exception as e:
         logger.error(f"Ошибка закрытия бота: {e}")
 
