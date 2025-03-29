@@ -1,4 +1,3 @@
-# src/main.py
 import os
 import logging
 import sys
@@ -34,7 +33,6 @@ load_dotenv(Path(__file__).parent / ".env")
 bot = Bot(token=os.getenv("TELEGRAM_TOKEN"))
 dp = Dispatcher(storage=storage)
 
-
 # Основные команды
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
@@ -45,33 +43,42 @@ async def cmd_start(message: types.Message):
     /guide - User guide"""
     await message.answer(commands)
 
-
 @dp.message(Command("guide"))
 async def cmd_guide(message: types.Message):
     guide_text = "📚 User guide content..."
     await message.answer(guide_text)
 
-
 @dp.message(Command("help"))
 async def cmd_help(message: types.Message):
     await message.answer("ℹ️ Help information...")
 
-
 # Инициализация сервисов
-youtube_service = YouTubeService(bot, dp)  # <-- Создать экземпляр
+youtube_service = YouTubeService(bot, dp)
 youtube_service.setup_routes()
 
 async def main():
     try:
         await dp.start_polling(bot)
+    except asyncio.CancelledError:
+        logger.info("Получен сигнал отмены")
     finally:
         await storage.close()
-        await bot.close()
-
+        try:
+            await bot.close()
+        except Exception as e:
+            logger.error(f"Ошибка при закрытии бота: {e}")
 
 if __name__ == "__main__":
     if missing := [var for var in REQUIRED_ENV if not os.getenv(var)]:
         logger.critical(f"Missing env vars: {missing}")
         sys.exit(1)
 
-    asyncio.run(main())
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        loop.run_until_complete(main())
+    except KeyboardInterrupt:
+        logger.info("Бот остановлен пользователем")
+    finally:
+        loop.close()
+        logger.info("Работа бота завершена")
