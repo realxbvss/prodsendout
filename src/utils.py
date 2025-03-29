@@ -1,4 +1,5 @@
 import asyncio
+import json
 import os
 from typing import Optional
 from aiogram.fsm.storage.redis import RedisStorage
@@ -33,6 +34,12 @@ async def run_subprocess(cmd: list) -> bool:
     except Exception as e:
         logger.error(f"Ошибка подпроцесса: {str(e)}")
         return False
+
+async def get_instagram_session(user_id: int) -> Optional[dict]:
+    encrypted = await get_user_data(user_id, "instagram_session")
+    if not encrypted:
+        return None
+    return json.loads(fernet.decrypt(encrypted.encode()).decode())
 
 async def decrypt_user_data(user_id: int, key: str) -> Optional[bytes]:
     try:

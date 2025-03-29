@@ -2,6 +2,8 @@ import os
 import logging
 import sys
 import asyncio
+from instagrapi import Client
+from .instagram_service import InstagramService
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -42,10 +44,11 @@ async def cmd_start(message: types.Message):
 async def cmd_guide(message: types.Message):
     await message.answer("📚 Инструкция по использованию бота...")
 
+# --- ИНИЦИАЛИЗАЦИЯ СЕРВИСОВ ---
 
+instagram_service = InstagramService(bot, dp)
 youtube_service = YouTubeService(bot, dp)
 youtube_service.setup_routes()
-
 
 async def graceful_shutdown():
     logger.info("Завершение работы...")
