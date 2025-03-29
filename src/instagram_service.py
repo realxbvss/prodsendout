@@ -1,13 +1,24 @@
 # src/instagram_service.py
 import logging
+import os
+import json
 from datetime import datetime, timedelta
 from typing import List, Dict, Optional
 from pathlib import Path
-
-from aiogram.filters import Command
-import json
-
 from instagrapi import Client
+from cryptography.fernet import Fernet
+import ssl
+from aiogram.filters import Command
+
+from aiogram import Bot, Dispatcher, types
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
+
+from .utils import get_user_data, update_user_data, fernet, storage
+from .vpn_manager import VPNManager  # Добавляем интеграцию с VPN
+
+logger = logging.getLogger(__name__)
 from instagrapi.exceptions import (
     LoginRequired,
     TwoFactorRequired,
@@ -42,6 +53,37 @@ class InstagramService:
         TWO_FACTOR_INPUT = State()
         TIME_RANGE_INPUT = State()
         PROCESSING = State()
+
+    def __init__(self, bot: Bot, dp: Dispatcher):
+        self.bot = bot
+        self.dp = dp
+        self.vpn = VPNManager()
+        self.states = self.InstagramStates()
+        self.ssl_ctx = ssl.create_default_context()
+        self.ssl_ctx.set_ciphers('DEFAULT@SECLEVEL=1')
+        self.setup_handlers()
+        self._init_vpn()
+
+    def _init_vpn(self):
+        if os.getenv("VPN_REQUIRED", "True") == "True":
+            result = self.vpn.start()
+            logger.info(result)
+
+    async def get_client(self, user_id: int) -> Client:
+        """Создание клиента с учетом прокси и SSL"""
+        # Получение пользовательского прокси
+        cl = Client(
+            proxy=await self._get_user_proxy(user_id),
+            ssl_context=self.ssl_ctx,
+            timeout=20
+        )
+        return cl
+
+    async def _get_user_proxy(self, user_id: int) -> Optional[str]:  # Возвращаем строку
+        encrypted = await storage.redis.get(f"proxy:{user_id}")
+        if encrypted:
+            return self.fernet.decrypt(encrypted).decode()
+        return None
 
     def __init__(self, bot: Bot, dp: Dispatcher):
         self.bot = bot
@@ -156,6 +198,8 @@ class InstagramService:
 
     async def process_instagram_data(self, user_id: int, state: FSMContext):
         try:
+            if not self.vpn.is_active():
+                self._init_vpn()
             data = await state.get_data()
             hours = data['hours']
             cl = await self.load_session(user_id)
