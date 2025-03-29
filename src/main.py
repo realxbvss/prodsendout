@@ -2,7 +2,7 @@ import os
 import logging
 import sys
 import asyncio
-from vpn_manager import VPNManager
+from src.vpn_manager import VPNManager
 from datetime import datetime, timezone
 from pathlib import Path
 from aiogram.fsm.state import State, StatesGroup
