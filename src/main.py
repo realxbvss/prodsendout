@@ -59,7 +59,7 @@ async def cmd_help(message: types.Message):
 
 # Инициализация сервисов
 youtube_service = YouTubeService(bot, dp)  # <-- Создать экземпляр
-youtube_service.setup_routes(dp)
+youtube_service.setup_routes()
 
 async def main():
     try:
