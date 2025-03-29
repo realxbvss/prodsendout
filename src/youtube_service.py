@@ -305,7 +305,7 @@ class YouTubeService:
         except Exception as e:
             await message.answer(f"❌ Ошибка формата: {str(e)}")
 
-    async def setup_routes(self):
+    def setup_routes(self):
         self.dp.message.register(self.handle_auth_start, Command("auth"))
         self.dp.message.register(self.handle_oauth_file, self.states.OAUTH_FLOW, F.document)
         self.dp.message.register(self.handle_oauth_code, self.states.OAUTH_FLOW)
