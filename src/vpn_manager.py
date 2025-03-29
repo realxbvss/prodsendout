@@ -5,26 +5,20 @@ from pathlib import Path
 
 
 class VPNManager:
-    def __init__(self):
-        self.config_path = Path(__file__).parent.parent / 'configs' / 'vpn.ovpn'
-        self.process = None
+    def connect(self):
+        """Новая реализация метода"""
+        return self.start()  # Используем существующий метод start()
 
     def start(self):
-        """Запуск VPN с проверкой статуса"""
+        # Существующая реализация
         try:
-            if self.is_active():
-                return "✅ VPN уже активен"
-
-            self.process = subprocess.Popen(
-                ["sudo", "openvpn", "--config", str(self.config_path)],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE
+            subprocess.run(
+                ["sudo", "openvpn", "--config", str(self.config_path), "--daemon"],
+                check=True
             )
-            time.sleep(8)  # Ожидание инициализации
-            return "✅ VPN успешно запущен" if self.is_active() else "❌ Не удалось запустить VPN"
-
-        except Exception as e:
-            return f"❌ Ошибка запуска VPN: {str(e)}"
+            return "✅ VPN успешно запущен"
+        except subprocess.CalledProcessError as e:
+            return f"❌ Ошибка запуска VPN: {e.stderr.decode()}"
 
     def stop(self):
         """Остановка VPN"""
