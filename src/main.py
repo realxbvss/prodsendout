@@ -10,7 +10,7 @@ from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 from aiogram.fsm.storage.redis import RedisStorage
 
-from youtube_service import YouTubeService
+from .youtube_service import YouTubeService
 from src.utils import (
     load_dotenv,
     get_user_data,

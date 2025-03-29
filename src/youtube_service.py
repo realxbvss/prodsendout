@@ -31,7 +31,7 @@ from googleapiclient.http import MediaFileUpload
 from google_auth_oauthlib.flow import InstalledAppFlow
 from moviepy.editor import ImageClip, AudioFileClip
 
-from src.utils import (
+from .utils import (
     get_user_data,
     update_user_data,
     fernet,
