@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from aiogram import Bot, Dispatcher, types
+from aiogram.exceptions import TelegramRetryAfter
 from aiogram.filters import Command
 from aiogram.fsm.storage.redis import RedisStorage
 
@@ -56,6 +57,7 @@ async def cmd_help(message: types.Message):
 youtube_service = YouTubeService(bot, dp)
 youtube_service.setup_routes()
 
+
 async def main():
     try:
         await dp.start_polling(bot)
@@ -64,6 +66,18 @@ async def main():
     finally:
         await storage.close()
         try:
+            # Закрываем сессию явно
+            if bot.session and not bot.session.closed:
+                await bot.session.close()
+        except Exception as e:
+            logger.error(f"Ошибка при закрытии сессии: {e}")
+
+        try:
+            # Закрываем бота с обработкой Flood Control
+            await bot.close()
+        except TelegramRetryAfter as e:
+            logger.warning(f"Ожидаем {e.retry_after} сек. перед закрытием бота")
+            await asyncio.sleep(e.retry_after)
             await bot.close()
         except Exception as e:
             logger.error(f"Ошибка при закрытии бота: {e}")
@@ -80,5 +94,10 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         logger.info("Бот остановлен пользователем")
     finally:
+        # Завершаем все асинхронные задачи
+        pending = asyncio.all_tasks(loop=loop)
+        for task in pending:
+            task.cancel()
+        loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
         loop.close()
         logger.info("Работа бота завершена")
